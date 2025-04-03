@@ -4,6 +4,11 @@ from pathlib import Path
 from parser import VLLMReportParser
 from adapters import DataFrameAdapter, JsonAdapter
 
+def load_config(config_path: str) -> dict:
+    """Load configuration from YAML file"""
+    with open(config_path) as f:
+        return yaml.safe_load(f)
+
 def main():
     parser = argparse.ArgumentParser(
         description="LLM report parser with configurable input adapters",
@@ -21,17 +26,24 @@ def main():
         help="Output file path"
     )
     parser.add_argument(
-        "-c", "--config",
+        "--query-config",
         required=True,
         type=str,
-        help="Path to YAML config"
+        help="Path to YAML config for query definitions"
     )
     parser.add_argument(
-        "-m", "--model",
-        required=True,
+        "--params-config",
+        default="config_parameters.yaml",
         type=str,
-        choices=["V3", "R1", "R1-Distill"],
-        help="Model to use"
+        help="Path to YAML config for model parameters"
+    )
+    parser.add_argument(
+        "-g",
+        "--gpus",
+        required=False,
+        type=int,
+        default=2,
+        help="Number of GPUs to use for tensor parallelism",
     )
     parser.add_argument(
         "-f", "--format",
@@ -46,30 +58,9 @@ def main():
         help="Key containing text in JSON (default: 'text')"
     )
     parser.add_argument(
-        "--report-type-col",
-        default="reportType",
-        help="Report type column in CSV (default: 'reportType')"
-    )
-    parser.add_argument(
         "--text-col",
         default="presentedForm_data",
         help="Text column in CSV (default: 'presentedForm_data')"
-    )
-    parser.add_argument(
-        "-g",
-        "--gpus",
-        required=False,
-        type=int,
-        default=2,
-        help="Number of GPUs to use for tensor parallelism",
-    )
-    parser.add_argument(
-        "-a",
-        "--attempts",
-        required=False,
-        type=int,
-        default=3,
-        help="Maximum number of LLM retry attempts",
     )
     parser.add_argument(
         "-r",
@@ -81,26 +72,39 @@ def main():
     )
 
     args = parser.parse_args()
-    model = f"deepseek-ai/DeepSeek-{args.model}"
-    if args.model == "R1-Distill":
-        model += "-Qwen-32B"
     
+    # Load model parameters from config file
+    params_config = load_config(args.params_config)
+    
+    # Handle model name mapping
+    model_name = params_config['model']
+    if model_name == "R1-Distill":
+        model_name += "-Qwen-32B"
+    model_path = f"deepseek-ai/DeepSeek-{model_name}"
+    
+    # Load query configuration
+    query_config = load_config(args.query_config)
+
     # Initialize parser
     report_parser = VLLMReportParser(
-        model=f"deepseek-ai/DeepSeek-{args.model}",
-        yaml_config=args.config,
+        model=model_path,
+        gpus=args.gpus,
         patterns_path=args.regex,
-        max_attempts=args.attempts,
+        max_model_len=params_config['max_model_len'],
+        max_tokens=params_config['max_tokens'],
+        temperature=params_config['temperature'],
+        top_p=params_config['top_p'],
+        repetition_penalty=params_config['repetition_penalty'],
+        max_attempts=params_config['max_attempts'],
+        update_config=params_config.get('update_config'),
     )
-    
+
     # Initialize appropriate adapter
     if args.format == "csv":
         df = pd.read_csv(args.input)
         adapter = DataFrameAdapter(
             df=df,
-            report_type_column=args.report_type_col,
-            text_column=args.text_col,
-            report_type_filter=report_parser.report_type
+            text_column=args.text_col
         )
     else:  # json
         adapter = JsonAdapter(

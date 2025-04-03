@@ -1,4 +1,4 @@
-# config_parser_template.yaml
+# config_query_template.yaml
 report_type: "Template"  # e.g., "Pathology", "Radiology", "DischargeSummary"
 
 system_instruction: |

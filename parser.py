@@ -13,31 +13,34 @@ class VLLMReportParser:
     def __init__(
         self,
         model: str,
-        yaml_config: str,
+        query_config: dict,
         gpus: int = 1,
-        max_attempts: int = 3,
         patterns_path: Optional[str] = None,
         max_model_len: int = 32768,
+        max_tokens: Optional[int] = None,
         temperature: float = 0.3,
         top_p: float = 0.9,
-        repetition_penalty: float = 1.2
+        repetition_penalty: float = 1.2,
+        max_attempts: int = 3,
+        update_config: Optional[List[Dict[str, Any]]] = None,
+        save_raw_output: bool = False,
     ):
         """
         Initialize the parser with vLLM configuration
         
         Args:
             model: Model name/path for vLLM
+            query_config: query configuration dictionary
             gpus: Number of GPUs for tensor parallelism
-            system_instruction: System prompt template
-            field_instructions: Field definitions template
-            task: Task description template
-            example: Example template
-            max_attempts: Maximum retry attempts
             patterns_path: Path to JSON file with optional extraction patterns
             max_model_len: Max sequence length for model
+            max_tokens: Max tokens for sampling
             temperature: Sampling temperature
             top_p: Nucleus sampling probability
             repetition_penalty: Repetition penalty factor
+            max_attempts: Maximum retry attempts
+            update_config: Optional config to update the default sampling params each attempt
+            save_raw_output: Save raw model outputs to data
         """
         self.llm = LLM(
             model=model,
@@ -47,28 +50,28 @@ class VLLMReportParser:
         )
         self.max_model_len = max_model_len
         self.sampling_params = SamplingParams(
-            max_tokens=500,
+            max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
             repetition_penalty=repetition_penalty
         )
-        with open(yaml_config) as f:
-            config = yaml.safe_load(f)
-
-        self.report_type = config['report_type']
-        self.field_config = config['field_instructions']  # Store the full field config
+        self.update_config = update_config
+        
+        self.report_type = query_config['report_type']
+        self.field_config = query_config['field_instructions']
         self.required_fields = [field['name'] for field in self.field_config]
-        print("Extracted required fields:", self.required_fields)
+        logging.info(f"Extracted required fields: {self.required_fields}")
         
         self.templates = {
-            'system': config['system_instruction'],
+            'system': query_config['system_instruction'],
             'fields': self._parse_field_instructions(self.field_config),
-            'task': config['task'],
-            'example': config['example']
+            'task': query_config['task'],
+            'example': query_config['example']
         }
 
         self.max_attempts = max_attempts
         self.patterns = self._load_patterns(patterns_path) if patterns_path else None
+        self.save_raw_output = save_raw_output
 
     def _load_patterns(self, patterns_path: str) -> Optional[Dict]:
         """Load and compile regex patterns from JSON file"""
@@ -77,7 +80,7 @@ class VLLMReportParser:
                 patterns = json.load(f)
             return self._compile_patterns(patterns)
         except Exception as e:
-            print(f"Error loading patterns: {e}")
+            logging.error(f"Error loading patterns: {e}")
             return None
 
     def _compile_patterns(self, patterns: Dict) -> Dict:
@@ -95,7 +98,7 @@ class VLLMReportParser:
                     'start': pat.get('start', 0)
                 }
             except Exception as e:
-                print(f"Error compiling pattern {name}: {e}")
+                logging.error(f"Error compiling pattern {name}: {e}")
         return compiled
 
     def _parse_field_instructions(self, fields: list) -> str:
@@ -165,7 +168,7 @@ class VLLMReportParser:
                     start = max(match.start(), pattern['start'])
                     extracted.append(text[start:match.end()])
             except Exception as e:
-                print(f"Error applying pattern: {e}")
+                logging.error(f"Error applying pattern {pattern['pattern']}: {e}")
         
         return "\n".join(extracted) if extracted else text
 
@@ -246,17 +249,24 @@ class VLLMReportParser:
                 template[field] = ""
         
         return f"""
+        {self.templates['system']}
         [IMPORTANT] Please ONLY provide these missing fields with EXACT formatting:
         
         {chr(10).join(instructions)}
         
-        [Report Content]
+        [file content begin]
         {processed_report}
+        [file content end]
         
-        Required format:
+        [TASK]
+        Extract information into this exact JSON structure:
         ```json
         {json.dumps(template, indent=4)}
         ```
+
+        {self.templates['example']}
+
+        Begin your response with: ```json
         """
 
     def _parse_response(self, response: str) -> Optional[Dict[str, Any]]:
@@ -344,6 +354,10 @@ class VLLMReportParser:
                     
                 queries = retry_queries
                 active_indices = retry_indices
+
+                if self.update_config:
+                    logging.info(f"Updating sampling params for attempt {attempt + 1}")
+                    self.sampling_params = SamplingParams(**self.update_config[attempt - 1])
             
             # Process batch
             responses = self.llm.generate(queries, self.sampling_params)
@@ -352,6 +366,10 @@ class VLLMReportParser:
             for i, resp in zip(active_indices, responses):
                 if parsed := self._parse_response(resp.outputs[0].text):
                     results[i].update(parsed)
+
+            if self.save_raw_output:
+                for i, resp in zip(active_indices, responses):
+                    results[i][f"raw_output_attempt_{attempt}"] = resp.outputs[0].text
         
         # Final validation
         for res in results:
@@ -369,6 +387,43 @@ class VLLMReportParser:
                 elif field_spec['type'] == 'list':
                     if not isinstance(res[field], list):
                         res[field] = field_spec['default']
+        
+        # Additional pass for required fields
+        required_fields = [
+            field['name'] for field in self.field_config 
+            if field.get('required', False)
+        ]
+        
+        if required_fields:
+            # Identify reports with missing required fields
+            required_indices = []
+            required_queries = []
+            for idx, res in enumerate(results):
+                missing_required = [
+                    field for field in required_fields
+                    if res.get(field, 'Not specified') == 'Not specified'
+                ]
+                if missing_required:
+                    required_indices.append(idx)
+                    required_queries.append(
+                        self._generate_followup_query(reports[idx], missing_required)
+                    )
+            
+            # Process required fields follow-up if needed
+            if required_queries:
+                responses = self.llm.generate(required_queries, self.sampling_params)
+                
+                # Update results with required fields
+                for i, resp in zip(required_indices, responses):
+                    if parsed := self._parse_response(resp.outputs[0].text):
+                        # Only update the required fields, preserve other fields
+                        for field in required_fields:
+                            if field in parsed:
+                                results[i][field] = parsed[field]
+                
+                if self.save_raw_output:
+                    for i, resp in zip(required_indices, responses):
+                        results[i]["raw_output_required_fields"] = resp.outputs[0].text
         
         return results
 
