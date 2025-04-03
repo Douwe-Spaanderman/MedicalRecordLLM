@@ -1,0 +1,159 @@
+# config_parser_template.yaml
+report_type: "Template"  # e.g., "Pathology", "Radiology", "DischargeSummary"
+
+system_instruction: |
+  [SYSTEM INSTRUCTION]
+  You are a medical data extraction system that ONLY outputs valid JSON.
+  Maintain strict compliance with these rules:
+  1. Always use ```json ``` markers
+  2. Use exact field names and structure
+  3. For missing data: "Not specified"
+  4. Never add explanatory text
+
+field_instructions:
+  # Basic Identification Fields
+  - name: "Report Type"
+    type: "string"
+    constraints: "Must match one of: [List allowed types]"
+    default: "Not specified"
+
+  - name: "Patient ID"
+    type: "string"
+    constraints: "Extract exactly as written"
+    notes: "Redact if needed for privacy"
+    default: "Not specified"
+
+  # Categorical Fields (Single Choice)
+  - name: "Specimen Type"
+    type: "string"
+    options:
+      - "Option 1"
+      - "Option 2"
+      - "Option 3"
+    constraints: "Must match exactly one option"
+    default: "Not specified"
+
+  # Free Text Fields  
+  - name: "Clinical History"
+    type: "string"
+    constraints: "Summarize in 1-2 sentences"
+    default: "Not specified"
+
+  # Nested Object Example
+  - name: "Measurement"
+    type: "nested"
+    structure:
+      - key: "Value"
+        type: "number"
+        constraints: "Numeric value only"
+      - key: "Unit"
+        type: "string"
+        options: ["mm", "cm", "mL"]
+    default:
+      Value: "Not specified"
+      Unit: "Not specified"
+
+  # List of Strings
+  - name: "Differential Diagnosis"
+    type: "list"
+    item_type: "string"
+    constraints: "Standardized disease names"
+    default: []
+
+  # List of Objects
+  - name: "Medications"
+    type: "list"
+    item_type: "dict"
+    required_keys: ["Drug", "Dose", "Frequency"]
+    default: []
+
+  # Conditional Field
+  - name: "Tumor Size"
+    type: "nested"
+    constraints: "Only if malignancy suspected"
+    structure:
+      - key: "Longest Dimension"
+        type: "number"
+      - key: "Other Dimensions"
+        type: "list"
+        item_type: "number"
+    default: "Not applicable"
+
+  # Quality Control Field
+  - name: "Data Quality Check"
+    type: "string"
+    constraints: |
+      Flag any of:
+      - "Missing critical data"
+      - "Conflicting findings" 
+      - "Unclear terminology"
+    default: "No issues detected"
+
+task: |
+  [TASK]
+  Extract ONLY these fields in EXACTLY this structure:
+  ```json
+  {
+    "Report Type": "",
+    "Patient ID": "",
+    "Specimen Type": "",
+    "Clinical History": "",
+    "Measurement": {
+      "Value": "",
+      "Unit": ""
+    },
+    "Differential Diagnosis": [],
+    "Medications": [
+      {
+        "Drug": "",
+        "Dose": "",
+        "Frequency": ""
+      }
+    ],
+    "Tumor Size": {
+      "Longest Dimension": "",
+      "Other Dimensions": []
+    },
+    "Data Quality Check": ""
+  }```
+
+example: |
+  [EXAMPLE]
+  [Sample Report]
+  Patient: 12345
+  Type: Discharge Summary
+  History: 68yo M with HTN, DM2 admitted for CHF exacerbation
+  Medications:
+  - Lisinopril 10mg daily
+  - Metformin 500mg BID
+  Measurements:
+  EF: 35% (previously 45%)
+  [Sample End]
+
+  [EXAMPLE OUTPUT]
+  ```json
+  {
+    "Report Type": "Discharge Summary",
+    "Patient ID": "12345",
+    "Specimen Type": "Not applicable",
+    "Clinical History": "68yo male with hypertension and type 2 diabetes admitted for CHF exacerbation",
+    "Measurement": {
+      "Value": "35",
+      "Unit": "%"
+    },
+    "Differential Diagnosis": [],
+    "Medications": [
+      {
+        "Drug": "Lisinopril",
+        "Dose": "10",
+        "Frequency": "daily"
+      },
+      {
+        "Drug": "Metformin",
+        "Dose": "500",
+        "Frequency": "BID"
+      }
+    ],
+    "Tumor Size": "Not applicable",
+    "Data Quality Check": "No issues detected"
+  }```
