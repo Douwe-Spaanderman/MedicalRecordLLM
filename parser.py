@@ -56,7 +56,6 @@ class VLLMReportParser:
             repetition_penalty=repetition_penalty
         )
         self.update_config = update_config
-        
         self.report_type = query_config['report_type']
         self.field_config = query_config['field_instructions']
         self.required_fields = [field['name'] for field in self.field_config]
@@ -330,48 +329,124 @@ class VLLMReportParser:
         return missing
 
     def process_reports(self, reports: List[str]) -> List[Dict[str, Any]]:
-        """Process a batch of reports and extract information"""
+        """Process a batch of reports with refined workflow:
+        1. First attempt to get all fields (naive search)
+        2. Then focus on missing required fields (max_attempts-1 attempts)
+        3. Finally focus on missing optional fields (max_attempts-1 attempts)
+        """
+        # Initialize empty results
         results = [{} for _ in reports]
-        active_indices = list(range(len(reports)))
+        required_fields = [field['name'] for field in self.field_config if field.get('required', False)]
+        optional_fields = [field['name'] for field in self.field_config if not field.get('required', False)]
         
-        for attempt in range(self.max_attempts):
-            # Generate queries
-            if attempt == 0:
-                queries = [self._generate_query(reports[i]) for i in active_indices]
-            else:
-                retry_indices = []
-                retry_queries = []
-                for idx in active_indices:
-                    missing = self.find_missing_fields(results[idx])
-                    if missing:
-                        retry_indices.append(idx)
-                        retry_queries.append(
-                            self._generate_followup_query(reports[idx], missing)
-                        )
+        # Phase 1: Initial naive search for all fields
+        logging.info("Starting initial naive search for all fields")
+        queries = [self._generate_query(report) for report in reports]
+        responses = self.llm.generate(queries, self.sampling_params)
+        
+        for idx, resp in enumerate(responses):
+            if parsed := self._parse_response(resp.outputs[0].text):
+                results[idx].update(parsed)
 
-                if not retry_queries:
+                if self.save_raw_output:
+                    results[idx]["raw_output_initial"] = resp.outputs[0].text
+            
+        # Phase 2: Focus on missing required fields
+        remaining_attempts = self.max_attempts - 1
+        if remaining_attempts > 0:
+            active_indices = [
+                i for i, res in enumerate(results)
+                if any(f not in res for f in required_fields)
+            ]
+            logging.info(f"Processing {len(active_indices)} reports with missing required fields")
+            
+            for attempt in range(remaining_attempts):
+                if not active_indices:
                     break
                     
-                queries = retry_queries
-                active_indices = retry_indices
+                # Generate follow-up queries for missing required fields
+                queries = []
+                new_active_indices = []
+                
+                for idx in active_indices:
+                    missing_required = [f for f in required_fields if f not in results[idx]]
+                    if missing_required:
+                        new_active_indices.append(idx)
+                        queries.append(
+                            self._generate_followup_query(reports[idx], missing_required)
+                        )
+                
+                if not queries:
+                    break
+                    
+                active_indices = new_active_indices
 
                 if self.update_config:
                     logging.info(f"Updating sampling params for attempt {attempt + 1}")
-                    self.sampling_params = SamplingParams(**self.update_config[attempt - 1])
-            
-            # Process batch
-            responses = self.llm.generate(queries, self.sampling_params)
-            
-            # Update results
-            for i, resp in zip(active_indices, responses):
-                if parsed := self._parse_response(resp.outputs[0].text):
-                    results[i].update(parsed)
-
-            if self.save_raw_output:
+                    self.sampling_params = SamplingParams(**self.update_config[attempt])
+                
+                # Process batch
+                responses = self.llm.generate(queries, self.sampling_params)
+                
+                # Update only required fields
                 for i, resp in zip(active_indices, responses):
-                    results[i][f"raw_output_attempt_{attempt}"] = resp.outputs[0].text
+                    if parsed := self._parse_response(resp.outputs[0].text):
+                        for field in required_fields:
+                            if field in parsed:
+                                results[i][field] = parsed[field]
+                        
+                        if self.save_raw_output:
+                            results[i][f"raw_output_required_{attempt+1}"] = resp.outputs[0].text
         
-        # Final validation
+        # Phase 3: Focus on missing optional fields (only for reports with all required fields)
+        remaining_attempts = self.max_attempts - 1
+        if remaining_attempts > 0:
+            active_indices = [
+                i for i, res in enumerate(results)
+                if all(f in res for f in required_fields) and 
+                any(f not in res for f in optional_fields)
+            ]
+            logging.info(f"Processing {len(active_indices)} reports with missing optional fields")
+            
+            for attempt in range(remaining_attempts):
+                if not active_indices:
+                    break
+                    
+                # Generate follow-up queries for missing optional fields
+                queries = []
+                new_active_indices = []
+                
+                for idx in active_indices:
+                    missing_optional = [f for f in optional_fields if f not in results[idx]]
+                    if missing_optional:
+                        new_active_indices.append(idx)
+                        queries.append(
+                            self._generate_followup_query(reports[idx], missing_optional)
+                        )
+                
+                if not queries:
+                    break
+                    
+                active_indices = new_active_indices
+
+                if self.update_config:
+                    logging.info(f"Updating sampling params for attempt {attempt + 1}")
+                    self.sampling_params = SamplingParams(**self.update_config[attempt])
+                
+                # Process batch
+                responses = self.llm.generate(queries, self.sampling_params)
+                
+                # Update only optional fields
+                for i, resp in zip(active_indices, responses):
+                    if parsed := self._parse_response(resp.outputs[0].text):
+                        for field in optional_fields:
+                            if field in parsed:
+                                results[i][field] = parsed[field]
+                        
+                        if self.save_raw_output:
+                            results[i][f"raw_output_optional_{attempt+1}"] = resp.outputs[0].text
+        
+        # Apply defaults for any remaining missing fields
         for res in results:
             for field_spec in self.field_config:
                 field = field_spec['name']
@@ -387,43 +462,6 @@ class VLLMReportParser:
                 elif field_spec['type'] == 'list':
                     if not isinstance(res[field], list):
                         res[field] = field_spec['default']
-        
-        # Additional pass for required fields
-        required_fields = [
-            field['name'] for field in self.field_config 
-            if field.get('required', False)
-        ]
-        
-        if required_fields:
-            # Identify reports with missing required fields
-            required_indices = []
-            required_queries = []
-            for idx, res in enumerate(results):
-                missing_required = [
-                    field for field in required_fields
-                    if res.get(field, 'Not specified') == 'Not specified'
-                ]
-                if missing_required:
-                    required_indices.append(idx)
-                    required_queries.append(
-                        self._generate_followup_query(reports[idx], missing_required)
-                    )
-            
-            # Process required fields follow-up if needed
-            if required_queries:
-                responses = self.llm.generate(required_queries, self.sampling_params)
-                
-                # Update results with required fields
-                for i, resp in zip(required_indices, responses):
-                    if parsed := self._parse_response(resp.outputs[0].text):
-                        # Only update the required fields, preserve other fields
-                        for field in required_fields:
-                            if field in parsed:
-                                results[i][field] = parsed[field]
-                
-                if self.save_raw_output:
-                    for i, resp in zip(required_indices, responses):
-                        results[i]["raw_output_required_fields"] = resp.outputs[0].text
         
         return results
 

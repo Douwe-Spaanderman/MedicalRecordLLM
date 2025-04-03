@@ -10,5 +10,9 @@ max_attempts: 3
 update_config:
   - temperature: 0.3
     top_p: 0.85
+    max_model_len: 32768
+    repetition_penalty: 1.2
   - temperature: 0.5
     top_p: 0.85
+    max_model_len: 32768
+    repetition_penalty: 1.2
