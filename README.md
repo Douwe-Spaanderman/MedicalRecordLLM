@@ -7,8 +7,8 @@ A configurable pipeline for extracting structured data from medical reports usin
 - **Structured Information Extraction**: Converts unstructured medical reports into structured data.
 - **Multi-Format Support**: Handles CSV, JSON, and raw text inputs.
 - **Customizable Extraction**: Define fields and validation rules via YAML.
-- **Automated Quality Control**: Ensures data completeness and consistency.
-- **Adaptive Retries**: Handles missing or incomplete extractions with intelligent retries.
+- **Intelligent Retry Workflow**: Prioritizes required fields with optimized retry logic.
+- **Configuration Management**: Separate model parameters and query configuration.
 
 ---
 
@@ -70,9 +70,28 @@ Each DeepSeek model has different GPU requirements:
 
 ## Defining Extraction Rules with YAML
 
-The pipeline is configured via a YAML file that defines the whole prompt, including system instructions, which fields to extract and how to validate them, and optionally an example case. In resources you can find an example [YAML file](resources/config_parser_template.yaml).
+The pipeline is configured via YAML files that defines the model parameters, and the prompt, including system instructions, which fields to extract and how to validate them, and optionally an example case. In resources you can find an example for both [Query YAML](resources/config_query_template.yaml) and [Parameter YAML](resources/config_parameter_template.yaml).
 
-### Example YAML Configuration
+## Configuration Files
+
+### 1. Model Parameters (`config_parameters.yaml`)
+
+```yaml
+model: "V3"  # Options: V3, V3-0324, R1, R1-Distill
+max_model_len: 32768
+max_tokens: null
+temperature: 0.3
+top_p: 0.9
+repetition_penalty: 1.2
+max_attempts: 3
+update_config:
+  - temperature: 0.5
+    top_p: 0.95
+  - temperature: 0.7
+    top_p: 0.99
+```
+
+### 2. Query Configuration (`query_config.yaml`)
 
 ```yaml
 report_type: "Pathology"
@@ -80,20 +99,16 @@ system_instruction: |
   [SYSTEM] You are a medical data extraction system...
 
 field_instructions:
-  - name: "Specimen Type"
+  - name: "diagnosis"
     type: "string"
-    options: ["Biopsy", "Resection"]
-    default: "Not specified"
+    required: true
+    constraints: "Primary diagnosis from pathology report"
 
 task: |
-  [TASK] Extract into this structure:
-  ```json
-  {
-    "Field1": ""
-  }```
+  [TASK] Extract information into JSON structure...
 ```
 
-### Supported Field Types
+#### Supported Field Types
 
 | Type    | Example Configuration |
 |---------|------------------------|
