@@ -1,5 +1,6 @@
 import pandas as pd
 from typing import Optional
+from typing import List, Dict, Any
 from .base_adapter import BaseAdapter
 
 class DataFrameAdapter(BaseAdapter):
@@ -23,6 +24,8 @@ class DataFrameAdapter(BaseAdapter):
         
         if self.report_type_filter is not None and self.report_type_column in df.columns:
             df = df[df[self.report_type_column] == self.report_type_filter]
+            df = df.reset_index(drop=True)
+            self.df = df.copy()
             
         if self.text_column not in df.columns:
             raise ValueError(f"DataFrame missing required text column: {self.text_column}")

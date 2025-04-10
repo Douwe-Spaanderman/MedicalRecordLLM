@@ -6,6 +6,7 @@ import pandas as pd
 from typing import Dict, List, Any, Optional, Tuple
 from vllm import LLM, SamplingParams
 import logging
+from adapters.base_adapter import BaseAdapter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -346,7 +347,10 @@ class VLLMReportParser:
         
         for idx, resp in enumerate(responses):
             if parsed := self._parse_response(resp.outputs[0].text):
-                results[idx].update(parsed)
+                for field in self.field_config:
+                    field_name = field['name']
+                    if field_name in parsed:
+                        results[idx][field_name] = parsed[field_name]
 
                 if self.save_raw_output:
                     results[idx]["raw_output_initial"] = resp.outputs[0].text

@@ -3,6 +3,8 @@ import pandas as pd
 from pathlib import Path
 from parser import VLLMReportParser
 from adapters import DataFrameAdapter, JsonAdapter
+import yaml
+import json
 
 def load_config(config_path: str) -> dict:
     """Load configuration from YAML file"""
@@ -58,6 +60,11 @@ def main():
         help="Key containing text in JSON (default: 'text')"
     )
     parser.add_argument(
+        "--report-type-key",
+        default="reportType",
+        help="Key containing report type in JSON (default: 'reportType')"
+    )
+    parser.add_argument(
         "--text-col",
         default="presentedForm_data",
         help="Text column in CSV (default: 'presentedForm_data')"
@@ -76,18 +83,16 @@ def main():
     # Load model parameters from config file
     params_config = load_config(args.params_config)
     
-    # Handle model name mapping
-    model_name = params_config['model']
-    if model_name == "R1-Distill":
-        model_name += "-Qwen-32B"
-    model_path = f"deepseek-ai/DeepSeek-{model_name}"
-    
+    # Model full path from config
+    model_path = params_config['model']
+
     # Load query configuration
     query_config = load_config(args.query_config)
 
     # Initialize parser
     report_parser = VLLMReportParser(
         model=model_path,
+        query_config=query_config,
         gpus=args.gpus,
         patterns_path=args.regex,
         max_model_len=params_config['max_model_len'],
@@ -104,7 +109,9 @@ def main():
         df = pd.read_csv(args.input)
         adapter = DataFrameAdapter(
             df=df,
-            text_column=args.text_col
+            report_type_column=args.report_type_key,
+            text_column=args.text_col,
+            report_type_filter=report_parser.report_type
         )
     else:  # json
         adapter = JsonAdapter(

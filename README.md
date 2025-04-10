@@ -37,9 +37,10 @@ The parser can be executed using the provided `run.py` script. Below is an examp
 python run.py \
   --input path/to/input.csv \
   --output path/to/output.csv \
-  --config configs/pathology.yaml \
-  --model V3 \
-  --format csv
+  --format csv \
+  --query-config configs/query.yaml \
+  --params-config configs/model.yaml \
+  --gpus 4
 ```
 
 ### Computation power
