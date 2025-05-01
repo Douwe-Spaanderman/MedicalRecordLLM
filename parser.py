@@ -60,7 +60,6 @@ class VLLMReportParser:
         self.report_type = query_config['report_type']
         self.field_config = query_config['field_instructions']
         self.required_fields = [field['name'] for field in self.field_config]
-        logging.info(f"Extracted required fields: {self.required_fields}")
         
         self.templates = {
             'system': query_config['system_instruction'],
@@ -106,54 +105,67 @@ class VLLMReportParser:
         instructions = []
         
         for idx, field in enumerate(fields, start=1):
-            parts = [f'{idx}. "{field["name"]}":']
+            lines = [f'{idx}. "{field["name"]}":']
             
-            # Add constraints
+            # Only add type for complex fields
+            if field["type"] in ("nested", "list") or "options" in field:
+                lines.append(f'   - Type: {field["type"].capitalize()}')
+            
+            # Handle constraints
             if 'constraints' in field:
-                if isinstance(field['constraints'], list):
-                    for constraint in field['constraints']:
-                        parts.append(f"   - {constraint}")
+                constraints = field['constraints']
+                if isinstance(constraints, list):
+                    lines.append('   - Constraints:')
+                    for item in constraints:
+                        lines.append(f'     • {item}')
                 else:
-                    for line in str(field['constraints']).split('\n'):
+                    for line in str(constraints).split('\n'):
                         if line.strip():
-                            parts.append(f"   - {line.strip()}")
+                            if line.strip().startswith('- '):
+                                lines.append(f'     • {line.strip()[2:]}')
+                            else:
+                                lines.append(f'   - {line.strip()}')
             
-            # Add options for choice fields
+            # Handle options with strict wording
             if 'options' in field:
-                opts = ", ".join(f'"{opt}"' for opt in field['options'])
-                parts.append(f"   - Options: {opts}")
+                opts = ', '.join(f'"{opt}"' for opt in field['options'])
+                lines.extend([
+                    f'   - Must be EXACTLY one of: [{opts}]',
+                    '      No variations or additions allowed'
+                ])
             
             # Handle nested structures
-            if field['type'] == 'nested':
-                structure_desc = "Nested structure: {" + ", ".join(
-                    f'"{sf["key"]}"' for sf in field['structure']
-                ) + "}"
-                parts.append(f"   - {structure_desc}")
-                
+            if field['type'] == 'nested' and 'structure' in field:
+                subfields = ', '.join(f'"{sf["key"]}"' for sf in field['structure'])
+                lines.append(f'   - Structure: {{{subfields}}}')
                 for subfield in field['structure']:
                     if 'constraints' in subfield:
-                        parts.append(f"     - {subfield['key']}: {subfield['constraints']}")
+                        lines.append(f'     • {subfield["key"]}: {subfield["constraints"]}')
             
-            # Handle list structures
+            # Handle list of dictionaries
             elif field['type'] == 'list' and field.get('item_type') == 'dict':
-                req_keys = ", ".join(f'"{k}"' for k in field.get('required_keys', []))
-                parts.append(f"   - List of dictionaries with keys: {req_keys}")
+                if 'required_keys' in field:
+                    keys = ', '.join(f'"{k}"' for k in field['required_keys'])
+                    lines.append(f'   - Required keys: {keys}')
             
-            # Add notes if present
-            if 'notes' in field:
-                parts.append(f"   - Note: {field['notes']}")
-            
-            # Add default value
+            # Handle default values
             default_value = field.get('default', 'Not specified')
             if isinstance(default_value, (dict, list)):
-                default_str = json.dumps(default_value, indent=4).replace('\n', '\n      ')
-                parts.append(f"   - Default: {default_str}")
+                if isinstance(default_value, list) and not default_value:
+                    lines.append('   - Default: []')
+                else:
+                    default_str = json.dumps(default_value, indent=2)
+                    if '\n' in default_str:
+                        default_str = default_str.replace('\n', '\n      ')
+                        lines.append(f'   - Default: {default_str}')
+                    else:
+                        lines.append(f'   - Default: {default_str}')
             else:
-                parts.append(f'   - Default: "{default_value}"')
+                lines.append(f'   - Default: "{default_value}"')
             
-            instructions.append("\n".join(parts))
+            instructions.append('\n'.join(lines))
         
-        return "[FIELD INSTRUCTIONS]\n" + "\n\n".join(instructions)
+        return instructions
 
     def _extract_text(self, text: str) -> str:
         """Apply pattern extraction if patterns are configured"""
@@ -172,164 +184,116 @@ class VLLMReportParser:
         
         return "\n".join(extracted) if extracted else text
 
-    def _generate_query(self, report: str, attempt: int = 1) -> str:
-        """Generate query for a single report"""
+    def _generate_query(self, report: str, patient: str, attempt: int = 1) -> str:
+        """Generate query for a single report with improved formatting"""
         processed_report = self._extract_text(report)
-        return f"""
-            {self.templates['system']}
+        prompt_parts = [
+            "[SYSTEM INSTRUCTION]",
+            self.templates['system'].strip(),
+            "",
+            "[FIELD INSTRUCTIONS]",
+            "\n".join(self.templates['fields']),
+            "",
+            "[TASK INSTRUCTION]",
+            self.templates['task'].strip(),
+            "",
+            "[EXAMPLE INPUT REPORT]",
+            self.templates['example']['input'].strip(),
+            "",
+            "[EXAMPLE EXPECTED OUTPUT]",
+            self.templates['example']['output'].strip(),
+            "",
+            "[BEGIN FILE CONTENT]",
+            f"Patient ID: {patient}",
+            f"Attempt: {attempt}",
 
-            {self.templates['fields']}
-
-            [file name]: report_attempt_{attempt}
-            [file content begin]
-            {processed_report}
-            [file content end]
-
-            {self.templates['task']}
-
-            {self.templates['example']}
-
-            Begin your response with: ```json
-        """
-
-    def _generate_followup_query(self, report: str, missing_fields: List[str]) -> str:
-        """Generate targeted follow-up query for missing fields"""
-        processed_report = self._extract_text(report)
-        
-        # Get specs for missing fields
-        field_specs = [
-            fs for fs in self.field_config 
-            if fs['name'] in missing_fields
+            processed_report.strip(),
+            "[END FILE CONTENT]",
+            "",
+            "Begin your extraction now. Your response MUST start with: ```json"
         ]
-        
-        # Build detailed instructions
-        instructions = []
-        for spec in field_specs:
-            desc = [f"{spec['name']}:"]
-            
-            if 'constraints' in spec:
-                if isinstance(spec['constraints'], str):
-                    desc.append(f"  - {spec['constraints']}")
-                else:
-                    for c in spec['constraints']:
-                        desc.append(f"  - {c}")
-            
-            if spec['type'] == 'nested':
-                subfields = ", ".join(
-                    f"{sf['key']} ({sf.get('constraints', '')}" 
-                    for sf in spec['structure']
-                )
-                desc.append(f"  - Nested structure: {{{subfields}}}")
-            
-            elif spec['type'] == 'list':
-                if spec.get('item_type') == 'dict':
-                    keys = ", ".join(spec['required_keys'])
-                    desc.append(f"  - List of dicts with keys: {keys}")
-                else:
-                    desc.append("  - List of text items")
-            
-            instructions.append("\n".join(desc))
-        
-        # Build JSON template
-        template = {}
-        for spec in field_specs:
-            field = spec['name']
-            
-            if spec['type'] == 'nested':
-                template[field] = {
-                    sf['key']: "" 
-                    for sf in spec['structure']
-                }
-            elif spec['type'] == 'list':
-                if spec.get('item_type') == 'dict':
-                    template[field] = [{}]  # Example with one empty dict
-                else:
-                    template[field] = ["item1", "item2"]  # Example string list
-            else:
-                template[field] = ""
-        
-        return f"""
-        {self.templates['system']}
-        [IMPORTANT] Please ONLY provide these missing fields with EXACT formatting:
-        
-        {chr(10).join(instructions)}
-        
-        [file content begin]
-        {processed_report}
-        [file content end]
-        
-        [TASK]
-        Extract information into this exact JSON structure:
-        ```json
-        {json.dumps(template, indent=4)}
-        ```
 
-        {self.templates['example']}
+        return "\n".join(prompt_parts)
 
-        Begin your response with: ```json
-        """
+    def _generate_followup_query(self, report: str, missing_fields: List[str], patient, attempt: int = 1) -> str:
+        """Generate targeted follow-up query for missing fields using consistent template"""
+        processed_report = self._extract_text(report)
+        
+        # Filter field config to only include missing fields
+        missing_config = [
+            field for field in self.field_config 
+            if field['name'] in missing_fields
+        ]
+
+        # Generate field instructions only for missing fields
+        missing_instructions = self._parse_field_instructions(missing_config)
+
+        # Create JSON template with only missing fields
+        json_template = {field['name']: "" for field in missing_config}
+
+        # Parse example output from YAML and filter for missing fields
+        # TODO: NOW requires a json to be present in the example output, which should be required.
+        try:
+            # Extract JSON from between the ```json markers
+            example_json_str = re.search(r'```json\s*({.*?})\s*```', 
+                                    self.templates['example']['output'], 
+                                    re.DOTALL).group(1)
+            full_example_output = json.loads(example_json_str)
+            example_output = {
+                field['name']: full_example_output[field['name']]
+                for field in missing_config
+                if field['name'] in full_example_output
+            }
+        except (AttributeError, json.JSONDecodeError, KeyError) as e:
+            logging.warning(f"Could not parse example output: {e}")
+            example_output = {}
+
+        prompt_parts = [
+            "[SYSTEM INSTRUCTION]",
+            self.templates['system'].strip(),
+            "",
+            "[FIELD INSTRUCTIONS]",
+            "\n".join(missing_instructions),
+            "",
+            "[TASK INSTRUCTION]", # TODO: this should be based on self.templates["task"]
+            "Extract ONLY these fields in EXACTLY this structure:",
+            "```json",
+            json.dumps(json_template, indent=4) + "```",
+            "",
+            "[EXAMPLE INPUT REPORT]",
+            self.templates['example']['input'].strip(),
+            "",
+            "[EXAMPLE EXPECTED OUTPUT]",
+            "```json",
+            json.dumps(example_output, indent=4) + "```",
+            "",
+            "[BEGIN FILE CONTENT]",
+            f"Patient ID: {patient}",
+            f"Attempt: {attempt}",
+
+            processed_report.strip(),
+            "[END FILE CONTENT]",
+            "",
+            "Extract ONLY the missing fields listed above. Your response MUST start with: ```json"
+        ]
+
+        return "\n".join(prompt_parts)
 
     def _parse_response(self, response: str) -> Optional[Dict[str, Any]]:
         """Extract JSON from response"""
         try:
-            json_match = re.search(r'```json\s*({.*?})\s*```', response, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group(1))
-        except (json.JSONDecodeError, AttributeError):
-            pass
+            json_matches = list(re.finditer(r'```json\s*(?P<json>{.*?})\s*```', response, re.DOTALL))
+            for match in reversed(json_matches):
+                try:
+                    return json.loads(match.group(1))
+                except json.JSONDecodeError:
+                    continue  # Try the next candidate      
+        except Exception as e:
+            logging.warning(f"JSON extraction failed: {e}")
+            
         return None
 
-    def find_missing_fields(self, data: Dict[str, Any]) -> List[str]:
-        """Identify missing or invalid fields based on the YAML config"""
-        missing = []
-        
-        for field_spec in self.field_config:
-            field_name = field_spec['name']
-            
-            # Field is completely missing
-            if field_name not in data:
-                missing.append(field_name)
-                continue
-                
-            value = data[field_name]
-            
-            # Check nested structures
-            if field_spec['type'] == 'nested':
-                if not isinstance(value, dict):
-                    missing.append(field_name)
-                else:
-                    # Check all required subfields exist
-                    for subfield in field_spec.get('structure', []):
-                        if subfield['key'] not in value:
-                            missing.append(field_name)
-                            break
-
-            elif field_spec['type'] == 'dynamic':
-                if not isinstance(value, dict):
-                    missing.append(field_name)
-            
-            # Check list structures
-            elif field_spec['type'] == 'list':
-                if not isinstance(value, list):
-                    missing.append(field_name)
-                else:
-                    # For lists of dictionaries
-                    if field_spec.get('item_type') == 'dict':
-                        required_keys = field_spec.get('required_keys', [])
-                        for item in value:
-                            if not isinstance(item, dict) or not all(k in item for k in required_keys):
-                                missing.append(field_name)
-                                break
-                    # For simple lists (like differential diagnosis)
-                    # No additional validation needed beyond being a list
-            
-            # Check empty values for simple fields
-            elif not value and value != 0:  # 0 is a valid value
-                missing.append(field_name)
-        
-        return missing
-
-    def process_reports(self, reports: List[str]) -> List[Dict[str, Any]]:
+    def process_reports(self, reports: List[str], patients: List[str]) -> List[Dict[str, Any]]:
         """Process a batch of reports with refined workflow:
         1. First attempt to get all fields (naive search)
         2. Then focus on missing required fields (max_attempts-1 attempts)
@@ -342,7 +306,7 @@ class VLLMReportParser:
         
         # Phase 1: Initial naive search for all fields
         logging.info("Starting initial naive search for all fields")
-        queries = [self._generate_query(report) for report in reports]
+        queries = [self._generate_query(report, patient) for report, patient in zip(reports, patients)]
         responses = self.llm.generate(queries, self.sampling_params)
         
         for idx, resp in enumerate(responses):
@@ -377,7 +341,7 @@ class VLLMReportParser:
                     if missing_required:
                         new_active_indices.append(idx)
                         queries.append(
-                            self._generate_followup_query(reports[idx], missing_required)
+                            self._generate_followup_query(reports[idx], missing_required, patients[idx], attempt)
                         )
                 
                 if not queries:
@@ -425,7 +389,7 @@ class VLLMReportParser:
                     if missing_optional:
                         new_active_indices.append(idx)
                         queries.append(
-                            self._generate_followup_query(reports[idx], missing_optional)
+                            self._generate_followup_query(reports[idx], missing_optional, patients[idx], attempt)
                         )
                 
                 if not queries:
@@ -479,6 +443,6 @@ class VLLMReportParser:
         Returns:
             Processed results in adapter's output format
         """
-        texts = adapter.prepare_inputs()
-        results = self.process_reports(texts)
+        texts, patients = adapter.prepare_inputs()
+        results = self.process_reports(texts, patients)
         return adapter.format_outputs(results)

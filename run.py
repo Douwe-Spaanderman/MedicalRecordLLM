@@ -70,6 +70,11 @@ def main():
         help="Text column in CSV (default: 'presentedForm_data')"
     )
     parser.add_argument(
+        "--patient-id-col",
+        default="patientId",
+        help="Patient ID column in CSV (default: 'patientId')"
+    )
+    parser.add_argument(
         "-r",
         "--regex",
         required=False,
@@ -111,12 +116,14 @@ def main():
             df=df,
             report_type_column=args.report_type_key,
             text_column=args.text_col,
-            report_type_filter=report_parser.report_type
+            report_type_filter=report_parser.report_type,
+            patient_id_column=args.patient_id_col
         )
     else:  # json
         adapter = JsonAdapter(
             input_path=args.input,
-            text_key=args.text_key
+            text_key=args.text_key,
+            id_key=args.patient_id_col
         )
     
     # Process reports
