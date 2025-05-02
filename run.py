@@ -75,6 +75,11 @@ def main():
         help="Patient ID column in CSV (default: 'patientId')"
     )
     parser.add_argument(
+        "--save-raw",
+        action="store_true",
+        help="Save raw model output to a file",
+    )
+    parser.add_argument(
         "-r",
         "--regex",
         required=False,
@@ -107,6 +112,7 @@ def main():
         repetition_penalty=params_config['repetition_penalty'],
         max_attempts=params_config['max_attempts'],
         update_config=params_config.get('update_config'),
+        save_raw_output=args.save_raw,
     )
 
     # Initialize appropriate adapter
