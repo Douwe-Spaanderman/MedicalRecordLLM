@@ -1,7 +1,8 @@
 from pathlib import Path
 import yaml
 import json
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Optional
+import sys
 
 def load_yaml_config(yaml_path: str) -> Dict:
     """Load query configuration from YAML file with validation"""
@@ -9,10 +10,18 @@ def load_yaml_config(yaml_path: str) -> Dict:
         config = yaml.safe_load(f)
     
     # Validate required sections
-    required_sections = ['system_instruction', 'field_instructions', 'task', 'example']
+    required_sections = ['system_instruction', 'field_instructions', 'task']
     for section in required_sections:
         if section not in config:
             raise ValueError(f"Missing required section in YAML: {section}")
+    
+    # Handle both single example and multiple examples
+    if 'examples' not in config and 'example' not in config:
+        raise ValueError("YAML config must contain either 'example' or 'examples' section")
+    
+    # Convert single example to list format for consistent handling
+    if 'example' in config:
+        config['examples'] = [config['example']]
     
     return config
 
@@ -64,7 +73,7 @@ def format_field_instruction(field: Dict, index: int) -> str:
             keys = ', '.join(f'"{k}"' for k in field['required_keys'])
             lines.append(f'   - Required keys: {keys}')
     
-    # In format_field_instruction() function
+    # Handle default values
     default_value = field.get('default', 'Not specified')
     if isinstance(default_value, (dict, list)):
         # Compact formatting for empty lists
@@ -85,7 +94,19 @@ def format_field_instruction(field: Dict, index: int) -> str:
     
     return '\n'.join(lines)
 
-def generate_prompt(query_config: Dict, sample_report: str = "[SAMPLE REPORT CONTENT]") -> str:
+def validate_example(example: Dict) -> None:
+    """Validate that an example has the correct structure"""
+    if not isinstance(example, dict):
+        raise ValueError("Example must be a dictionary")
+    if 'input' not in example or 'output' not in example:
+        raise ValueError("Example must contain both 'input' and 'output'")
+    if not isinstance(example['input'], str) or not isinstance(example['output'], str):
+        raise ValueError("Example input and output must be strings")
+
+def generate_prompt(
+    query_config: Dict, 
+    sample_report: str = "[SAMPLE REPORT CONTENT]"
+) -> str:
     """
     Generate a complete prompt from the YAML configuration
     
@@ -101,10 +122,9 @@ def generate_prompt(query_config: Dict, sample_report: str = "[SAMPLE REPORT CON
     for idx, field in enumerate(query_config['field_instructions'], start=1):
         field_instructions.append(format_field_instruction(field, idx))
     
-    # Ensure example has both input and output
-    example = query_config['example']
-    if not isinstance(example, dict) or 'input' not in example or 'output' not in example:
-        raise ValueError("Example must contain both 'input' and 'output'")
+    # Validate all examples
+    for example in query_config['examples']:
+        validate_example(example)
     
     # Construct the prompt
     prompt_parts = [
@@ -116,12 +136,27 @@ def generate_prompt(query_config: Dict, sample_report: str = "[SAMPLE REPORT CON
         "",
         "[TASK INSTRUCTION]",
         query_config['task'].strip(),
-        "",
-        "[EXAMPLE INPUT REPORT]",
-        example['input'].strip(),
-        "",
-        "[EXAMPLE EXPECTED OUTPUT]",
-        example['output'].strip(),
+    ]
+
+    # Add examples section
+    if query_config['examples']:
+        prompt_parts.extend([
+            "",
+            "[EXAMPLES]"
+        ])
+        
+        for example in query_config['examples']:
+            prompt_parts.extend([
+                "---",
+                "[EXAMPLE INPUT REPORT]",
+                example['input'].strip(),
+                "",
+                "[EXAMPLE EXPECTED OUTPUT]",
+                example['output'].strip()
+            ])
+
+    # Add the actual report content
+    prompt_parts.extend([
         "",
         "[BEGIN FILE CONTENT]",
         f"[file name]: report_preview",
@@ -129,7 +164,7 @@ def generate_prompt(query_config: Dict, sample_report: str = "[SAMPLE REPORT CON
         "[END FILE CONTENT]",
         "",
         "Begin your extraction now. Your response MUST start with: ```json"
-    ]
+    ])
     
     return "\n".join(prompt_parts)
 
@@ -165,5 +200,4 @@ def main():
         sys.exit(1)
 
 if __name__ == "__main__":
-    import sys
     main()

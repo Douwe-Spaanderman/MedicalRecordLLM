@@ -64,9 +64,16 @@ class VLLMReportParser:
         self.templates = {
             'system': query_config['system_instruction'],
             'fields': self._parse_field_instructions(self.field_config),
-            'task': query_config['task'],
-            'example': query_config['example']
+            'task': query_config['task']
         }
+
+        # Handle both single example and multiple examples format
+        if 'examples' in query_config:
+            self.templates['examples'] = query_config['examples']
+        elif 'example' in query_config:
+            self.templates['examples'] = [query_config['example']]
+        else:
+            self.templates['examples'] = []
 
         self.max_attempts = max_attempts
         self.patterns = self._load_patterns(patterns_path) if patterns_path else None
@@ -196,22 +203,35 @@ class VLLMReportParser:
             "",
             "[TASK INSTRUCTION]",
             self.templates['task'].strip(),
-            "",
-            "[EXAMPLE INPUT REPORT]",
-            self.templates['example']['input'].strip(),
-            "",
-            "[EXAMPLE EXPECTED OUTPUT]",
-            self.templates['example']['output'].strip(),
+        ]
+
+        # Add examples section if examples exist
+        if self.templates['examples']:
+            prompt_parts.extend([
+                "",
+                "[EXAMPLES]"
+            ])
+            
+            for example in self.templates['examples']:
+                prompt_parts.extend([
+                    "---",
+                    "[EXAMPLE INPUT REPORT]",
+                    example['input'].strip(),
+                    "",
+                    "[EXAMPLE EXPECTED OUTPUT]",
+                    example['output'].strip()
+                ])
+
+        prompt_parts.extend([
             "",
             "[BEGIN FILE CONTENT]",
             f"Patient ID: {patient}",
             f"Attempt: {attempt}",
-
             processed_report.strip(),
             "[END FILE CONTENT]",
             "",
             "Begin your extraction now. Your response MUST start with: ```json"
-        ]
+        ])
 
         return "\n".join(prompt_parts)
 
@@ -231,22 +251,28 @@ class VLLMReportParser:
         # Create JSON template with only missing fields
         json_template = {field['name']: "" for field in missing_config}
 
-        # Parse example output from YAML and filter for missing fields
-        # TODO: NOW requires a json to be present in the example output, which should be required.
-        try:
-            # Extract JSON from between the ```json markers
-            example_json_str = re.search(r'```json\s*({.*?})\s*```', 
-                                    self.templates['example']['output'], 
-                                    re.DOTALL).group(1)
-            full_example_output = json.loads(example_json_str)
-            example_output = {
-                field['name']: full_example_output[field['name']]
-                for field in missing_config
-                if field['name'] in full_example_output
-            }
-        except (AttributeError, json.JSONDecodeError, KeyError) as e:
-            logging.warning(f"Could not parse example output: {e}")
-            example_output = {}
+        # Collect example outputs for missing fields from all examples
+        example_outputs = []
+        for example in self.templates['examples']:
+            try:
+                # Extract JSON from between the ```json markers
+                example_json_str = re.search(r'```json\s*({.*?})\s*```', 
+                                          example['output'], 
+                                          re.DOTALL).group(1)
+                full_example_output = json.loads(example_json_str)
+                filtered_output = {
+                    field['name']: full_example_output[field['name']]
+                    for field in missing_config
+                    if field['name'] in full_example_output
+                }
+                if filtered_output:
+                    example_outputs.append({
+                        'input': example['input'],
+                        'output': filtered_output
+                    })
+            except (AttributeError, json.JSONDecodeError, KeyError) as e:
+                logging.warning(f"Could not parse example output: {e}")
+                continue
 
         prompt_parts = [
             "[SYSTEM INSTRUCTION]",
@@ -255,27 +281,40 @@ class VLLMReportParser:
             "[FIELD INSTRUCTIONS]",
             "\n".join(missing_instructions),
             "",
-            "[TASK INSTRUCTION]", # TODO: this should be based on self.templates["task"]
+            "[TASK INSTRUCTION]",
             "Extract ONLY these fields in EXACTLY this structure:",
             "```json",
             json.dumps(json_template, indent=4) + "```",
-            "",
-            "[EXAMPLE INPUT REPORT]",
-            self.templates['example']['input'].strip(),
-            "",
-            "[EXAMPLE EXPECTED OUTPUT]",
-            "```json",
-            json.dumps(example_output, indent=4) + "```",
+        ]
+
+        # Add examples section if we have relevant examples
+        if example_outputs:
+            prompt_parts.extend([
+                "",
+                "[EXAMPLES]"
+            ])
+            
+            for example in example_outputs:
+                prompt_parts.extend([
+                    "---",
+                    "[EXAMPLE INPUT REPORT]",
+                    example['input'].strip(),
+                    "",
+                    "[EXAMPLE EXPECTED OUTPUT]",
+                    "```json",
+                    json.dumps(example['output'], indent=4) + "```"
+                ])
+
+        prompt_parts.extend([
             "",
             "[BEGIN FILE CONTENT]",
             f"Patient ID: {patient}",
             f"Attempt: {attempt}",
-
             processed_report.strip(),
             "[END FILE CONTENT]",
             "",
             "Extract ONLY the missing fields listed above. Your response MUST start with: ```json"
-        ]
+        ])
 
         return "\n".join(prompt_parts)
 
