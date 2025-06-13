@@ -7,6 +7,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from vllm import LLM, SamplingParams
 import logging
 from adapters.base_adapter import BaseAdapter
+import openai
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -15,7 +16,8 @@ class VLLMReportParser:
         self,
         model: str,
         query_config: dict,
-        gpus: int = 1,
+        base_url: str = "http://localhost:8000/v1",
+        api_key: Optional[str] = "DummyAPIKey",
         patterns_path: Optional[str] = None,
         max_model_len: int = 32768,
         max_tokens: Optional[int] = None,
@@ -32,7 +34,8 @@ class VLLMReportParser:
         Args:
             model: Model name/path for vLLM
             query_config: query configuration dictionary
-            gpus: Number of GPUs for tensor parallelism
+            base_url: Base URL for vLLM API
+            api_key: API key for vLLM (often not required locally)
             patterns_path: Path to JSON file with optional extraction patterns
             max_model_len: Max sequence length for model
             max_tokens: Max tokens for sampling
@@ -43,12 +46,10 @@ class VLLMReportParser:
             update_config: Optional config to update the default sampling params each attempt
             save_raw_output: Save raw model outputs to data
         """
-        self.llm = LLM(
-            model=model,
-            max_model_len=max_model_len,
-            trust_remote_code=True,
-            tensor_parallel_size=gpus
-        )
+        # Initialize OpenAI client with or without custom base URL
+        openai.api_key = api_key
+        openai.base_url = base_url
+        self.model_name = model
         self.max_model_len = max_model_len
         self.sampling_params = SamplingParams(
             max_tokens=max_tokens,
@@ -333,11 +334,20 @@ class VLLMReportParser:
         return None
 
     def query_model(self, queries: List[str]) -> List[Any]:
-        """Query the vLLM model with a batch of queries"""
-        return self.llm.generate(
-            queries,
-            sampling_params=self.sampling_params,
-        )
+        """Query the vLLM model using openAI"""
+        responses = []
+        for query in queries:
+            response = openai.ChatCompletion.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": query}],
+                temperature=self.sampling_params.temperature,
+                max_tokens=self.sampling_params.max_tokens,
+                top_p=self.sampling_params.top_p,
+                # `repetition_penalty` is not supported by OpenAI API, even for vLLM emulation
+                # So you may need to configure it on the server side or omit it
+            )
+            responses.append(response['choices'][0]['message']['content'])
+        return responses
 
     def process_reports(self, reports: List[str], patients: List[str]) -> List[Dict[str, Any]]:
         """Process a batch of reports with refined workflow:

@@ -42,19 +42,24 @@ def main():
         help="Path to YAML config for model parameters"
     )
     parser.add_argument(
-        "-g",
-        "--gpus",
-        required=False,
-        type=int,
-        default=2,
-        help="Number of GPUs to use for tensor parallelism",
-    )
-    parser.add_argument(
         "-f", "--format",
         required=True,
         type=str,
         choices=["csv", "json"],
         help="Input file format"
+    )
+    parser.add_argument(
+        "-b", 
+        "--base-url",
+        default="http://localhost:8000/v1",
+        type=str,
+        help="Base URL for the LLM API"
+    )
+    parser.add_argument(
+        "--api-key",
+        default="DummyAPIKey",
+        type=str,
+        help="API key for the LLM service (if required)"
     )
     parser.add_argument(
         "--text-key",
@@ -105,7 +110,8 @@ def main():
     report_parser = VLLMReportParser(
         model=model_path,
         query_config=query_config,
-        gpus=args.gpus,
+        base_url=args.base_url,
+        api_key=args.api_key,
         patterns_path=args.regex,
         max_model_len=params_config.get('max_model_len', 2048),
         max_tokens=params_config.get('max_tokens', None),
