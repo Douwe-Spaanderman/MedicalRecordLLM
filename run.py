@@ -28,12 +28,14 @@ def main():
         help="Output file path"
     )
     parser.add_argument(
+        "-q",
         "--query-config",
         required=True,
         type=str,
         help="Path to YAML config for query definitions"
     )
     parser.add_argument(
+        "-p",
         "--params-config",
         default="config_parameters.yaml",
         type=str,
@@ -56,7 +58,7 @@ def main():
     )
     parser.add_argument(
         "--text-key",
-        default="text",
+        default="Text",
         help="Key containing text in JSON (default: 'text')"
     )
     parser.add_argument(
@@ -66,12 +68,12 @@ def main():
     )
     parser.add_argument(
         "--text-col",
-        default="presentedForm_data",
+        default="Text",
         help="Text column in CSV (default: 'presentedForm_data')"
     )
     parser.add_argument(
         "--patient-id-col",
-        default="patientId",
+        default="patientID",
         help="Patient ID column in CSV (default: 'patientId')"
     )
     parser.add_argument(
@@ -105,14 +107,14 @@ def main():
         query_config=query_config,
         gpus=args.gpus,
         patterns_path=args.regex,
-        max_model_len=params_config['max_model_len'],
-        max_tokens=params_config['max_tokens'],
-        temperature=params_config['temperature'],
-        top_p=params_config['top_p'],
-        repetition_penalty=params_config['repetition_penalty'],
-        max_attempts=params_config['max_attempts'],
-        update_config=params_config.get('update_config'),
-        save_raw_output=args.save_raw,
+        max_model_len=params_config.get('max_model_len', 2048),
+        max_tokens=params_config.get('max_tokens', None),
+        temperature=params_config.get('temperature', 0.3),
+        top_p=params_config.get('top_p', 0.9),
+        repetition_penalty=params_config.get('repetition_penalty', 1.0),
+        max_attempts= params_config.get('max_attempts', 1),
+        update_config=params_config.get('update_config', None),
+        save_raw_output=args.save_raw
     )
 
     # Initialize appropriate adapter

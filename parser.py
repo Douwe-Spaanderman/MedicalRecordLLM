@@ -332,6 +332,13 @@ class VLLMReportParser:
             
         return None
 
+    def query_model(self, queries: List[str]) -> List[Any]:
+        """Query the vLLM model with a batch of queries"""
+        return self.llm.generate(
+            queries,
+            sampling_params=self.sampling_params,
+        )
+
     def process_reports(self, reports: List[str], patients: List[str]) -> List[Dict[str, Any]]:
         """Process a batch of reports with refined workflow:
         1. First attempt to get all fields (naive search)
@@ -346,7 +353,7 @@ class VLLMReportParser:
         # Phase 1: Initial naive search for all fields
         logging.info("Starting initial naive search for all fields")
         queries = [self._generate_query(report, patient) for report, patient in zip(reports, patients)]
-        responses = self.llm.generate(queries, self.sampling_params)
+        responses = self.query_model(queries)
         
         for idx, resp in enumerate(responses):
             if parsed := self._parse_response(resp.outputs[0].text):
@@ -393,7 +400,7 @@ class VLLMReportParser:
                     self.sampling_params = SamplingParams(**self.update_config[attempt])
                 
                 # Process batch
-                responses = self.llm.generate(queries, self.sampling_params)
+                responses = self.query_model(queries)
                 
                 # Update only required fields
                 for i, resp in zip(active_indices, responses):
@@ -441,7 +448,7 @@ class VLLMReportParser:
                     self.sampling_params = SamplingParams(**self.update_config[attempt])
                 
                 # Process batch
-                responses = self.llm.generate(queries, self.sampling_params)
+                responses = self.query_model(queries)
                 
                 # Update only optional fields
                 for i, resp in zip(active_indices, responses):
