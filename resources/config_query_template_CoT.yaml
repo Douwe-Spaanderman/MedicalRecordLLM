@@ -1,0 +1,153 @@
+field_instructions:
+  # Basic Identification Fields
+  - name: "Report Type"
+    type: "string"
+    default: "Not specified"
+
+  - name: "Patient ID"
+    type: "string"
+    constraints: "Extract exactly as written"
+    default: "Not specified"
+
+  # Categorical Fields (Single Choice)
+  - name: "Specimen Type"
+    type: "string"
+    options:
+      - "Option 1"
+      - "Option 2"
+      - "Option 3"
+    default: "Not specified"
+
+  # Free Text Fields  
+  - name: "Clinical History"
+    type: "string"
+    constraints: "Summarize relevant history in 1–2 concise sentences"
+    default: "Not specified"
+
+  # Dict Object Example
+  - name: "Measurement"
+    type: "dictionary"
+    structure:
+      - key: "Value"
+        type: "float"
+        constraints: " Extract only the numeric portion (ignore any units or text)"
+      - key: "Unit"
+        type: "string"
+        options: ["mm", "cm", "mL"]
+    default:
+      Value: "Not specified"
+      Unit: "Not specified"
+
+  # List of Strings
+  - name: "Differential Diagnosis"
+    type: "list"
+    constraints: "Array of standardized disease names (ICD-10 preferred)"
+    default: []
+
+  # List of Objects
+  - name: "Medications"
+    type: "list of dictionaries"
+    structure:
+      - key: "Drug"
+        type: "string"
+      - key: "Dose"
+        type: "float"
+      - key: "Frequency"
+        type: "string"
+    default: []
+
+  # Conditional Field
+  - name: "Tumor Size"
+    type: "dictionary"
+    constraints: "ONLY include if malignancy suspected"
+    structure:
+      - key: "Longest Dimension"
+        type: "float"
+      - key: "Other Dimensions"
+        type: "list"
+    default: "Not applicable"
+
+  # Quality Control Field
+  - name: "Data Quality Check"
+    type: "string"
+    constraints: |
+      Flag any of:
+      - "Missing critical data"
+      - "Conflicting findings" 
+      - "Unclear terminology"
+    default: "No issues detected"
+
+task: |
+  Extract ONLY these fields in EXACTLY this structure:
+  ```json
+  {
+    "Report Type": "",
+    "Patient ID": "",
+    "Specimen Type": "",
+    "Clinical History": "",
+    "Measurement": {
+      "Value": "",
+      "Unit": ""
+    },
+    "Differential Diagnosis": [],
+    "Medications": [
+      {
+        "Drug": "",
+        "Dose": "",
+        "Frequency": ""
+      }
+    ],
+    "Tumor Size": {
+      "Longest Dimension": "",
+      "Other Dimensions": []
+    },
+    "Data Quality Check": ""
+  }```
+
+example:
+  input: |
+    Patient: 12345
+    Type: Discharge Summary
+    History: 68yo M with HTN, DM2 admitted for CHF exacerbation
+    Medications:
+    - Lisinopril 10mg daily
+    - Metformin 500mg BID
+    Measurements:
+    EF: 35% (previously 45%)
+  reasoning: |
+    - The report type is a discharge summary, which is confirmed by the context.
+    - The patient ID is explicitly mentioned as "12345".
+    - The specimen type is not specified in the input, so it defaults to "Not specified".
+    - The clinical history summarizes the patient's condition and relevant medical history.
+    - The measurement indicates an ejection fraction (EF) of 35%, which is a percentage.
+    - There are no differential diagnoses mentioned, so it defaults to an empty array.
+    - The medications include Lisinopril and Metformin with their respective doses and frequencies.
+    - Tumor size is not applicable in this case as it is a discharge summary for CHF exacerbation, not a malignancy.
+    - The data quality check shows no issues detected, as there are no missing or conflicting data points.
+  output: |
+    ```json
+    {
+      "Report Type": "Discharge Summary",
+      "Patient ID": "12345",
+      "Specimen Type": "Not specified",
+      "Clinical History": "68yo male with hypertension and type 2 diabetes admitted for CHF exacerbation",
+      "Measurement": {
+        "Value": "35",
+        "Unit": "%"
+      },
+      "Differential Diagnosis": [],
+      "Medications": [
+        {
+          "Drug": "Lisinopril",
+          "Dose": "10",
+          "Frequency": "daily"
+        },
+        {
+          "Drug": "Metformin",
+          "Dose": "500",
+          "Frequency": "BID"
+        }
+      ],
+      "Tumor Size": "Not applicable",
+      "Data Quality Check": "No issues detected"
+    }```
