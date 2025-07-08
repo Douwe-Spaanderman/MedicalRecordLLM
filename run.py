@@ -28,6 +28,14 @@ def main():
         help="Output file path"
     )
     parser.add_argument(
+        "-pr",
+        "--prompt-method",
+        required=True,
+        options=["ZeroShot", "FewShot", "CoT", "SelfConsistency", "PromptChain"],
+        type=str,
+        help="Path to YAML config for query definitions"
+    )
+    parser.add_argument(
         "-q",
         "--query-config",
         required=True,
@@ -35,7 +43,7 @@ def main():
         help="Path to YAML config for query definitions"
     )
     parser.add_argument(
-        "-p",
+        "-pa",
         "--params-config",
         default="config_parameters.yaml",
         type=str,
@@ -99,27 +107,18 @@ def main():
     
     # Load model parameters from config file
     params_config = load_config(args.params_config)
-    
-    # Model full path from config
-    model_path = params_config['model']
 
     # Load query configuration
     query_config = load_config(args.query_config)
 
     # Initialize parser
     report_parser = VLLMReportParser(
-        model=model_path,
         query_config=query_config,
+        model_config=params_config,
         base_url=args.base_url,
         api_key=args.api_key,
+        prompt_method=args.prompt_method,
         patterns_path=args.regex,
-        max_model_len=params_config.get('max_model_len', 2048),
-        max_tokens=params_config.get('max_tokens', None),
-        temperature=params_config.get('temperature', 0.3),
-        top_p=params_config.get('top_p', 0.9),
-        repetition_penalty=params_config.get('repetition_penalty', 1.0),
-        max_attempts= params_config.get('max_attempts', 1),
-        update_config=params_config.get('update_config', None),
         save_raw_output=args.save_raw
     )
 
