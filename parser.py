@@ -459,7 +459,7 @@ class VLLMReportParser:
             temperature=self.sampling_params.temperature,
             max_tokens=self.sampling_params.max_tokens,
             top_p=self.sampling_params.top_p,
-            repetition_penalty=self.sampling_params.repetition_penalty
+            #repetition_penalty=self.sampling_params.repetition_penalty
         )
         return response.choices[0].message.content
 
@@ -499,6 +499,7 @@ class VLLMReportParser:
             if self.verbose:
                 logging.info(f"Raw response for patient {patient}: {response}")
 
+            import ipdb; ipdb.set_trace()
             # We should probably parse directly using text_format
             response = self._parse_json(response)
 

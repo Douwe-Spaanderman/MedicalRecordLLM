@@ -31,7 +31,7 @@ def main():
         "-pr",
         "--prompt-method",
         required=True,
-        options=["ZeroShot", "FewShot", "CoT", "SelfConsistency", "PromptChain"],
+        choices=["ZeroShot", "FewShot", "CoT", "SelfConsistency", "PromptChain"],
         type=str,
         help="Path to YAML config for query definitions"
     )
@@ -72,7 +72,7 @@ def main():
     parser.add_argument(
         "--text-key",
         default="Text",
-        help="Key containing text in JSON (default: 'text')"
+        help="Key containing text in JSON (default: 'Text')"
     )
     parser.add_argument(
         "--report-type-key",
@@ -82,12 +82,12 @@ def main():
     parser.add_argument(
         "--text-col",
         default="Text",
-        help="Text column in CSV (default: 'presentedForm_data')"
+        help="Text column in CSV (default: 'Text')"
     )
     parser.add_argument(
         "--patient-id-col",
         default="patientID",
-        help="Patient ID column in CSV (default: 'patientId')"
+        help="Patient ID column in CSV (default: 'patientID')"
     )
     parser.add_argument(
         "--save-raw",
@@ -114,7 +114,7 @@ def main():
     # Initialize parser
     report_parser = VLLMReportParser(
         query_config=query_config,
-        model_config=params_config,
+        params_config=params_config,
         base_url=args.base_url,
         api_key=args.api_key,
         prompt_method=args.prompt_method,
@@ -129,7 +129,6 @@ def main():
             df=df,
             report_type_column=args.report_type_key,
             text_column=args.text_col,
-            report_type_filter=report_parser.report_type,
             patient_id_column=args.patient_id_col
         )
     else:  # json

@@ -164,4 +164,5 @@ venv/*
 .vscode/*
 *__pycache__*
 
+experiment/*
 experiments/*
