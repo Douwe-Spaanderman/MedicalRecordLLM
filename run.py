@@ -31,7 +31,7 @@ def main():
         "-pr",
         "--prompt-method",
         required=True,
-        choices=["ZeroShot", "FewShot", "CoT", "SelfConsistency", "PromptChain"],
+        choices=["ZeroShot", "OneShot", "CoT", "SelfConsistency", "PromptChain"],
         type=str,
         help="Path to YAML config for query definitions"
     )
@@ -102,6 +102,12 @@ def main():
         default=None,
         help="Path to the regex patterns to extract (should be .json file). This can be used to use existing structured data in the reports",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Do you want to print intermediates, such as raw prompts etc. (Nice for debugging but slows down workflow quite a bit)"
+    )
 
     args = parser.parse_args()
     
@@ -119,7 +125,8 @@ def main():
         api_key=args.api_key,
         prompt_method=args.prompt_method,
         patterns_path=args.regex,
-        save_raw_output=args.save_raw
+        save_raw_output=args.save_raw,
+        verbose=args.verbose,
     )
 
     # Initialize appropriate adapter

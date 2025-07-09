@@ -6,6 +6,9 @@ import logging
 from adapters.base_adapter import BaseAdapter
 from openai import OpenAI
 from collections import OrderedDict
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains import LLMChain, SequentialChain
+from langchain.schema import BaseOutputParser
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -46,7 +49,7 @@ class VLLMReportParser:
             top_p=params_config.get('top_p', 0.9),
             repetition_penalty=params_config.get('repetition_penalty', 1.0)
         )
-        self.self_consistency_sampling = params_config.get('self_consistency_sampling', {"num_samples": 1, "temperature": 0.3})
+        self.self_consistency_sampling = params_config.get('self_consistency_sampling', {"num_samples": 3, "temperature": [0.3, 0.5, 0.7]})
     
         # Load prompt configuration and method
         self.query_config = query_config
@@ -57,6 +60,9 @@ class VLLMReportParser:
         self.patterns = self._load_patterns(patterns_path) if patterns_path else None
         self.save_raw_output = save_raw_output
         self.verbose = verbose
+        if self.verbose:
+            import langchain
+            langchain.verbose = True
 
     def _load_patterns(self, patterns_path: str) -> Optional[Dict]:
         """Load and compile regex patterns from JSON file"""
@@ -159,7 +165,7 @@ class VLLMReportParser:
         else:
             return list(set(chains))  # Return unique chain orders
 
-    def _format_field_instruction(self, field: Dict[str, str], index: int, chain: Optional[int]) -> str:
+    def _format_field_instruction(self, field: Dict[str, str], index: int, chain: Optional[int] = None) -> str:
         """Convert YAML field config into numbered instruction format
 
         Args:
@@ -205,9 +211,9 @@ class VLLMReportParser:
         if field['type'] in ['dictionary', 'list of dictionaries'] and 'structure' in field:
             subfields = ', '.join(f'"{sf["key"]}"' for sf in field['structure'])
             if field['type'] == 'dictionary':
-                instruction.append(f'   - Expected structure keys: {{ {subfields} }}')
+                instruction.append(f'   - Expected structure keys: {subfields}')
             elif field['type'] == 'list of dictionaries':
-                instruction.append(f'   - Each dictionary must contain the keys: {{ {subfields} }}')
+                instruction.append(f'   - Each dictionary must contain the keys: {subfields}')
 
             for subfield in field['structure']:
                 key = subfield["key"]
@@ -242,7 +248,7 @@ class VLLMReportParser:
         
         return '\n'.join(instruction)
 
-    def _format_promptchain_instructions(self, instructions: str, chain_indexes: List[int]) -> str:
+    def _format_promptchain_instructions(self, instructions: str, chain_indexes: List[int], variable_name:str) -> str:
         """
         Extract and filter instructions for PromptChain method based on chain indexes.
 
@@ -252,7 +258,7 @@ class VLLMReportParser:
         """
         # Extract everything before the ```json block
         preamble_match = re.split(r'```json', instructions)
-        preamble = preamble_match[0].strip() if preamble_match else ""
+        preamble = preamble_match[0].strip() + "\n" if preamble_match else ""
 
         # Extract the JSON block using your existing function
         json_part = self._parse_json(instructions)
@@ -267,20 +273,65 @@ class VLLMReportParser:
             filtered_json[key] = json_part[key]
 
         # Format back to task instruction style
-        instructions = f"{preamble}\n```json\n{json.dumps(filtered_json, indent=2)}\n```"
+        variable_placeholder = f"{{{variable_name}}}"
+        instructions = "\n".join([
+            f"{preamble}",
+            "```json",
+            variable_placeholder,
+            "```"
+        ])
 
-        return instructions
+        return instructions, json.dumps(filtered_json, indent=2)
 
-    def _generate_query(self, report: str, patient: str, chain: Optional[int] = None) -> str:
-        """Generate query for a single report with improved formatting"""
+    def _format_json_instructions(self, instructions:str, variable_name:str) -> str:
+        """
+        Convert instructions containing a JSON block into a properly formatted string
+
+        Args:
+            instructions: Full instructions string containing JSON block
+
+        Returns:
+            Formatted instructions string with JSON block
+        """
+        # Extract everything before the ```json block
+        preamble_match = re.split(r'```json', instructions)
+        preamble = preamble_match[0].strip() + "\n" if preamble_match else ""
+
+        # Extract the JSON block using your existing function
+        json_part = self._parse_json(instructions)
+
+        # Format back to task instruction style
+        variable_placeholder = f"{{{variable_name}}}"
+        instructions = "\n".join([
+            f"{preamble}",
+            "```json",
+            variable_placeholder,
+            "```"
+        ])
+
+        return instructions, json.dumps(json_part, indent=2)
+
+    def _generate_query(self, chain: Optional[int] = None) -> List[str]:
+        """
+        Generate the query string based on the prompt method and configuration
+
+        Args:
+            chain: Optional chain index for PromptChain method
+
+        Returns:
+            A list of strings representing the query components
+        """
+        # Initialize query variables for downstream chain construction - necessary for ChatPromptTemplate 
+        query_variables = {}
         # Build system instructions. Either use the config or default to a generic instruction
         if 'system_instruction' in self.query_config:
             print("WARNING: using system instruction from config file. This is not recommended.")
-            system_instruction = self.query_config['system_instruction'].strip()
+            system_instructions = self.query_config['system_instruction'].strip()
         else:
             print("Building system instruction based on prompt method, which is recommended")
             if self.prompt_method in ["ZeroShot", "OneShot"]:
-                system_instruction = [
+                system_instructions = [
+                    "[SYSTEM INSTRUCTION]",
                     "You are a medical data extraction system that ONLY outputs valid JSON. Maintain strict compliance with these rules:",
                     "1. ALWAYS begin and end your response with ```json markers",
                     "2. Use EXACT field names and structure provided",
@@ -288,7 +339,8 @@ class VLLMReportParser:
                     "4. NEVER add commentary, explanations, or deviate from the output structure"
                 ]
             elif self.prompt_method in ["CoT", "SelfConsistency", "PromptChain"]:
-                system_instruction = [
+                system_instructions = [
+                    "[SYSTEM INSTRUCTION]",
                     "You are a medical data extraction system that performs structured reasoning before producing output. Follow these strict rules:",
                     "1. First, reason step-by-step to identify and justify each extracted field.",
                     "2. After reasoning, output ONLY valid JSON in the exact structure provided.",
@@ -298,10 +350,10 @@ class VLLMReportParser:
                     "6. NEVER include commentary, explanations, or deviate from the specified format in the final JSON."
                 ]
 
-            system_instruction = "\n".join(system_instruction)
+            system_instructions = "\n".join(system_instructions)
 
         # Build field instructions
-        field_instructions = []
+        field_instructions = ["[FIELD INSTRUCTIONS]"]
         chain_indexes = []
         for idx, field in enumerate(self.query_config['field_instructions'], start=1):
             field_instruction = self._format_field_instruction(field, idx, chain)
@@ -311,36 +363,37 @@ class VLLMReportParser:
             else:
                 field_instructions.append(field_instruction)
                 chain_indexes.append(idx-1)
+
+        field_instructions = "\n".join(field_instructions)
         
         # Build task instruction
         task_instructions = self.query_config['task'].strip()
         if self.prompt_method == "PromptChain":
-            task_instructions = self._format_promptchain_instructions(task_instructions, chain_indexes)
+            task_instructions, task_variable = self._format_promptchain_instructions(task_instructions, chain_indexes, "task_variable")
+        else:
+            task_instructions, task_variable = self._format_json_instructions(task_instructions, "task_variable")
+        
+        # Store task instructions in query variables for downstream use
+        query_variables['task_variable'] = task_variable
 
-        # Construct the prompt
-        prompt_parts = [
-            "[SYSTEM INSTRUCTION]",
-            system_instruction,
-            "",
-            "[FIELD INSTRUCTIONS]",
-            "\n".join(field_instructions),
-            "",
+        task_instructions = "\n".join([
             "[TASK INSTRUCTION]",
-            task_instructions,
-        ]
+            task_instructions
+        ])
 
         # Add examples section
+        example_instructions = []
         if self.prompt_method != 'ZeroShot':
             if 'example' not in self.query_config:
                 raise ValueError("Examples are required for prompt methods other than ZeroShot")
             
             example = self.query_config["example"]
-            self.validate_example(example)
-            prompt_parts.extend([
+            self._validate_example(example)
+            example_instructions.extend([
                 "",
                 "[EXAMPLE]"
             ])
-            prompt_parts.extend([
+            example_instructions.extend([
                 "---",
                 "[EXAMPLE INPUT REPORT]",
                 example['input'].strip(),
@@ -356,51 +409,58 @@ class VLLMReportParser:
                     reasoning_instructions = reasoning_instructions.split("\n")
                     reasoning_instructions = "\n".join([reasoning_instructions[i] for i in chain_indexes if i < len(reasoning_instructions)])
 
-                prompt_parts.extend([
+                example_instructions.extend([
                     "[EXAMPLE THINKING]",
                     reasoning_instructions,
                     "",
                 ])
 
-            example_instructions = example['output'].strip()
+            example_outcome = example['output'].strip()
             if self.prompt_method == "PromptChain":
-                example_instructions = self._format_promptchain_instructions(example_instructions, chain_indexes)
+                example_outcome, example_output_variable = self._format_promptchain_instructions(example_outcome, chain_indexes, "example_output_variable")
+            else:
+                example_outcome, example_output_variable = self._format_json_instructions(example_outcome, "example_output_variable")
 
-            prompt_parts.extend([
+            # Store example output variable in query variables for downstream use
+            query_variables["example_output_variable"] = example_output_variable
+                            
+            example_instructions.extend([
                 "[EXAMPLE EXPECTED OUTPUT]",
-                example_instructions
+                example_outcome
             ])
 
+            example_instructions = "\n".join(example_instructions)
+
         # Add the actual report content
-        prompt_parts.extend([
+        report_instructions = "\n".join([
             "",
             "[BEGIN FILE CONTENT]",
-            f"[file name]: {patient}",
-            report.strip(),
+            "[file name]: {patient}",
+            "{report}",
             "[END FILE CONTENT]",
             "",
         ])
 
         if self.prompt_method in ["ZeroShot", "OneShot"]:
-            prompt_parts.append("Begin your extraction now. Your response MUST start with: ```json")
+            final_instructions = "Begin your extraction now. Your response MUST start with: ```json"
         elif self.prompt_method in ["CoT", "SelfConsistency", "PromptChain"]:
-            prompt_parts.append("Begin your extraction now. First, reason step-by-step to identify each required field. After reasoning, output ONLY the final structured data and ensure your response starts with: ```json")
+            final_instructions = "Begin your extraction now. First, reason step-by-step to identify each required field. After reasoning, output ONLY the final structured data and ensure your response starts with: ```json"
 
-        return "\n".join(prompt_parts)
+        return system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, query_variables
 
-    def _generate_prompt_self_consistency(self, report: str, patient: str, responses: List[Dict[str, str]]) -> str:
+    def _generate_prompt_self_consistency(self) -> List[str]:
         """
         Generate a prompt specifically for Self-Consistency method
 
-        Args:
-            report: The medical report text
-            patient: Patient identifier or name
-            responses: Candidate outputs from the model for Self-Consistency
-
         Returns:    
-            The complete formatted prompt for Self-Consistency
+            Formatted prompt string for Self-Consistency
         """
+        # Initialize query variables for downstream chain construction - necessary for ChatPromptTemplate
+        query_variables = {}
+
+        # Build system instructions
         system_instruction = "\n".join([
+            "[SYSTEM INSTRUCTION]",
             "You are a medical data extraction system that performs structured reasoning across multiple reasoning paths before producing output. Follow these strict rules:",
             "1. First, review all candidate outputs and reason step-by-step to identify the most consistent and well-supported values for each field.",
             "2. After reasoning, output ONLY valid JSON in the exact structure provided.",
@@ -411,45 +471,52 @@ class VLLMReportParser:
         ])
 
         # Build field instructions
-        field_instructions = []
+        field_instructions = ["[FIELD INSTRUCTIONS]"]
         for idx, field in enumerate(self.query_config['field_instructions'], start=1):
             field_instructions.append(self._format_field_instruction(field, idx))
 
-        # Construct the prompt
-        prompt_parts = [
-            "[SYSTEM INSTRUCTION]",
-            system_instruction,
-            "",
-            "[FIELD INSTRUCTIONS]",
-            "\n".join(field_instructions),
-            "",
-            "[TASK INSTRUCTION]",
-            self.query_config['task'].strip(),
-            "",
-            "[BEGIN FILE CONTENT]",
-            f"[file name]: {patient}",
-            report.strip(),
-            "[END FILE CONTENT]",
-            "",
-            "[BEGIN SELF-CONSISTENCY CANDIDATE OUTPUTS]",
-            ""
-        ]
+        field_instructions = "\n".join(["[TASK INSTRUCTION]"] + field_instructions)
 
-        for i, response in enumerate(responses, start=1):
-            prompt_parts.extend([
-                f"[CANDIDATE OUTPUT {i}]",
+        # Build task instruction
+        task_instructions = self.query_config['task'].strip()
+        task_instructions, task_variable = self._format_json_instructions(task_instructions, "task_variable")
+        
+        # Store task instructions in query variables for downstream use
+        query_variables['task_variable'] = task_variable
+
+        task_instructions = "\n".join([
+            "[TASK INSTRUCTION]",
+            task_instructions
+        ])
+
+        # Construct the prompt
+        report_instructions = "\n".join([
+            "[BEGIN FILE CONTENT]",
+            "[file name]: {patient}",
+            "{report}",
+            "[END FILE CONTENT]"
+        ])
+
+        candidate_instructions = ["[BEGIN SELF-CONSISTENCY CANDIDATE OUTPUTS]"]
+        num_samples = self.self_consistency_sampling.get('num_samples', 3)
+        # run through num_samples
+        for i in range(num_samples):
+            reasoning_placeholder = f"{{reasoning_{i+1}}}"
+            response_placeholder = f"{{response_{i+1}}}"
+            candidate_instructions.extend([
+                f"[CANDIDATE OUTPUT {i+1}]",
                 "[Reasoning]",
-                response['reasoning'].strip(),
+                reasoning_placeholder,
                 "[Structured Output]",
-                response['output'].strip(),
+                response_placeholder,
                 ""
             ])
 
-        prompt_parts += [
-            "[END SELF-CONSISTENCY CANDIDATE OUTPUTS]",
-            "Begin reconciliation now. First, review all reasoning paths and identify the most consistent and well-supported value for each required field. After reasoning, output ONLY the final structured data and ensure your response starts with: ```json"
-        ]
-        return "\n".join(prompt_parts)
+        candidate_instructions = "\n".join(candidate_instructions + ["[END SELF-CONSISTENCY CANDIDATE OUTPUTS]"])
+
+        final_instructions = "Begin reconciliation now. First, review all reasoning paths and identify the most consistent and well-supported value for each required field. After reasoning, output ONLY the final structured data and ensure your response starts with: ```json"
+
+        return system_instruction, field_instructions, task_instructions, report_instructions, candidate_instructions, final_instructions, query_variables
 
     def query_model(self, query: str) -> str:
         """Query the LLM model using openAI"""
@@ -466,59 +533,79 @@ class VLLMReportParser:
     def process_reports(self, reports: List[str], patients: List[str]) -> List[Dict[str, Any]]:
         """Process all reports
         """       
+        logging.info(f"Stating generating prompt using {self.prompt_method} method")
+        if self.prompt_method == "PromptChain":
+            if self.chains is None:
+                raise ValueError("PromptChain method requires chain definitions in the query configuration")
+            
+            # Generate prompts for each chain
+            prompt_templates = []
+            for chain in self.chains:
+                system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, query_variables = self._generate_query(chain=chain)
+                prompt = [
+                    ("system", system_instructions),
+                    ("user", field_instructions),
+                    ("user", task_instructions),
+                ]
+
+                if example_instructions:
+                    prompt.append(("user", example_instructions))
+
+                prompt.extend([
+                    ("user", report_instructions),
+                    ("user", final_instructions)
+                ])
+                prompt_template = ChatPromptTemplate.from_messages(prompt)
+                prompt_template = prompt_template.partial(**query_variables)
+
+                prompt_templates.append(prompt_template)
+        else:
+            system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, query_variables = self._generate_query(chain=None)
+            prompt = [
+                ("system", system_instructions),
+                ("user", field_instructions),
+                ("user", task_instructions),
+            ]
+
+            if example_instructions:
+                prompt.append(("user", example_instructions))
+
+            prompt.extend([
+                ("user", report_instructions),
+                ("user", final_instructions)
+            ])
+            prompt_template = ChatPromptTemplate.from_messages(prompt)
+            prompt_template = prompt_template.partial(**query_variables)
+
+            if self.prompt_method == "SelfConsistency":
+                # For SelfConsistency, we will generate a follow-up prompt
+                system_instruction, field_instructions, task_instructions, report_instructions, candidate_instructions, final_instructions, query_variables = self._generate_prompt_self_consistency()
+                follow_up_prompt_template = ChatPromptTemplate.from_messages([
+                    ("system", system_instruction),
+                    ("user", field_instructions),
+                    ("user", task_instructions),
+                    ("user", report_instructions),
+                    ("user", candidate_instructions),
+                    ("user", final_instructions)
+                ])
+                follow_up_prompt_template = follow_up_prompt_template.partial(**query_variables)
+
         logging.info("Starting report processing...")
         response = []
         for i, (report, patient) in enumerate(zip(reports, patients)):
             logging.info(f"Processing report {i+1}/{len(reports)} for patient {patient}")
-            if self.prompt_method == "SelfConsistency":
-                print('Not implemented yet')
-            elif self.prompt_method == "PromptChain":
-                if self.chains is None:
-                    raise ValueError("PromptChain method requires chain definitions in the query configuration")
-                # Generate query for each chain
-                query = []
-                for chain in self.chains:
-                    query.append(self._generate_query(report, patient, chain=chain))
+
+            if self.prompt_method == "PromptChain":
+                # Use the prompt template for the specific chain
+                for chain, prompt_template in zip(self.chains, prompt_templates):
+                    prompt = prompt_template.invoke({"report": report, "patient": patient})
+                    print(prompt.to_messages())
+                    query = self.query_model(prompt)
+                    response.append(query)
             else:
-                query =  self._generate_query(report, patient, chain=None)
-
-            if self.verbose:
-                logging.info(f"Raw query for patient {patient}: {query}")
-                
-            if self.prompt_method == "SelfConsistency":
-                # TODO correctly implement number of samples generated and temperature changes
-                responses = []
-                for _ in range(self.self_consistency_sampling['num_samples']):
-                    responses.append(self.query_model(query))
-                
-                query = self._generate_prompt_self_consistency(report, patient, response)
-                response = self.query_model(query)
-            else:
-                response = self.query_model(query)
-
-            if self.verbose:
-                logging.info(f"Raw response for patient {patient}: {response}")
-
-            import ipdb; ipdb.set_trace()
-            # We should probably parse directly using text_format
-            response = self._parse_json(response)
-
-            for field_spec in self.field_config:
-                field = field_spec['name']
-                if field not in response:
-                    response[field] = field_spec.get('default', 'Not specified')
-                elif field_spec['type'] == 'nested':
-                    if not isinstance(response[field], dict):
-                        response[field] = field_spec['default']
-                    else:
-                        for subfield in field_spec['structure']:
-                            if subfield['key'] not in response[field]:
-                                response[field][subfield['key']] = subfield.get('default', 'Not specified')
-                elif field_spec['type'] == 'list':
-                    if not isinstance(response[field], list):
-                        response[field] = field_spec['default']
-
-            response.append(response)
+                prompt = prompt_template.invoke({"report": report, "patient": patient})
+                print(prompt.to_messages())
+                query = self.query_model(prompt)
         
         return response
 
