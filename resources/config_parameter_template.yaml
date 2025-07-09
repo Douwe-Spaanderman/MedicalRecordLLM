@@ -1,7 +1,7 @@
 # config_query_template.yaml
-report_type: "Template" # Template based on my selected parameters
+experiment_name: "Template"
 model: "facebook/opt-125m"
-max_model_len: 32768
+max_model_len: 2048
 max_tokens: null
 temperature: 0.3
 top_p: 0.9
@@ -10,9 +10,11 @@ max_attempts: 3
 update_config:
   - temperature: 0.3
     top_p: 0.85
-    max_model_len: 32768
+    max_model_len: 2048
     repetition_penalty: 1.2
   - temperature: 0.5
     top_p: 0.85
-    max_model_len: 32768
+    max_model_len: 2048
     repetition_penalty: 1.2
+sanitize_categorical: true
+align_ontology: true

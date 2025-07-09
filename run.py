@@ -28,24 +28,26 @@ def main():
         help="Output file path"
     )
     parser.add_argument(
+        "-pr",
+        "--prompt-method",
+        required=True,
+        choices=["ZeroShot", "FewShot", "CoT", "SelfConsistency", "PromptChain"],
+        type=str,
+        help="Path to YAML config for query definitions"
+    )
+    parser.add_argument(
+        "-q",
         "--query-config",
         required=True,
         type=str,
         help="Path to YAML config for query definitions"
     )
     parser.add_argument(
+        "-pa",
         "--params-config",
         default="config_parameters.yaml",
         type=str,
         help="Path to YAML config for model parameters"
-    )
-    parser.add_argument(
-        "-g",
-        "--gpus",
-        required=False,
-        type=int,
-        default=2,
-        help="Number of GPUs to use for tensor parallelism",
     )
     parser.add_argument(
         "-f", "--format",
@@ -55,9 +57,22 @@ def main():
         help="Input file format"
     )
     parser.add_argument(
+        "-b", 
+        "--base-url",
+        default="http://localhost:8000/v1",
+        type=str,
+        help="Base URL for the LLM API"
+    )
+    parser.add_argument(
+        "--api-key",
+        default="DummyAPIKey",
+        type=str,
+        help="API key for the LLM service (if required)"
+    )
+    parser.add_argument(
         "--text-key",
-        default="text",
-        help="Key containing text in JSON (default: 'text')"
+        default="Text",
+        help="Key containing text in JSON (default: 'Text')"
     )
     parser.add_argument(
         "--report-type-key",
@@ -66,13 +81,13 @@ def main():
     )
     parser.add_argument(
         "--text-col",
-        default="presentedForm_data",
-        help="Text column in CSV (default: 'presentedForm_data')"
+        default="Text",
+        help="Text column in CSV (default: 'Text')"
     )
     parser.add_argument(
         "--patient-id-col",
-        default="patientId",
-        help="Patient ID column in CSV (default: 'patientId')"
+        default="patientID",
+        help="Patient ID column in CSV (default: 'patientID')"
     )
     parser.add_argument(
         "--save-raw",
@@ -92,27 +107,19 @@ def main():
     
     # Load model parameters from config file
     params_config = load_config(args.params_config)
-    
-    # Model full path from config
-    model_path = params_config['model']
 
     # Load query configuration
     query_config = load_config(args.query_config)
 
     # Initialize parser
     report_parser = VLLMReportParser(
-        model=model_path,
         query_config=query_config,
-        gpus=args.gpus,
+        params_config=params_config,
+        base_url=args.base_url,
+        api_key=args.api_key,
+        prompt_method=args.prompt_method,
         patterns_path=args.regex,
-        max_model_len=params_config['max_model_len'],
-        max_tokens=params_config['max_tokens'],
-        temperature=params_config['temperature'],
-        top_p=params_config['top_p'],
-        repetition_penalty=params_config['repetition_penalty'],
-        max_attempts=params_config['max_attempts'],
-        update_config=params_config.get('update_config'),
-        save_raw_output=args.save_raw,
+        save_raw_output=args.save_raw
     )
 
     # Initialize appropriate adapter
@@ -122,7 +129,6 @@ def main():
             df=df,
             report_type_column=args.report_type_key,
             text_column=args.text_col,
-            report_type_filter=report_parser.report_type,
             patient_id_column=args.patient_id_col
         )
     else:  # json
