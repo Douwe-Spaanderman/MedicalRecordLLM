@@ -15,8 +15,8 @@ class VLLMReportParser:
     def __init__(
         self,
         params_config: dict,
-        query_config: dict,
-        base_url: str = "http://localhost:8000/v1",
+        prompt_config: dict,
+        base_url: str = "http://localhost:8000/v1/",
         api_key: Optional[str] = "DummyAPIKey",
         prompt_method: str = "ZeroShot",
         patterns_path: Optional[str] = None,
@@ -28,7 +28,7 @@ class VLLMReportParser:
         
         Args:
             params_config: Model parameters configuration dictionary
-            query_config: Configuration for the query, including field and tasks specifications
+            prompt_config: Configuration for the prompt, including field and tasks specifications
             base_url: Base URL for vLLM API
             api_key: API key for vLLM (often not required locally)
             prompt_method: Method for generating prompts (e.g., "ZeroShot")
@@ -43,18 +43,16 @@ class VLLMReportParser:
             openai_api_key=api_key,
             temperature=params_config.get('temperature', 0.3),
             top_p=params_config.get('top_p', 0.9),
-            repetition_penalty=params_config.get('repetition_penalty', 1.0),
-            max_tokens=params_config.get('max_tokens', 1024),
-            max_model_len=params_config.get('max_model_len', 2048),
-            model_kwargs={
-                "repetition_penalty": params_config.get('repetition_penalty', 1.0),
-            },
-            output_version="responses/v1"
+            #max_tokens=params_config.get('max_tokens', 1024),
+            #max_model_len=params_config.get('max_model_len', 2048),
+            #model_kwargs={
+            #    "repetition_penalty": params_config.get('repetition_penalty', 1.0),
+            #},
         )
         self.self_consistency_sampling = params_config.get('self_consistency_sampling', {"num_samples": 3, "temperature": [0.1, 0.3, 0.5]})
 
         # Load prompt configuration and method
-        self.query_config = query_config
+        self.prompt_config = prompt_config
         self.prompt_method = prompt_method
         self.chains = self._detect_chains()
 
@@ -136,24 +134,24 @@ class VLLMReportParser:
 
     def _detect_chains(self) -> Optional[List[int]]:
         """
-        Detect if the query configuration contains chains for PromptChain method
+        Detect if the prompt configuration contains chains for PromptChain method
 
         Returns:
             List of chain indices if chains are defined, otherwise None
         """
-        # Chains are defined in the query_config under 'field_instructions'
+        # Chains are defined in the prompt_config under 'field_instructions'
         chains = []
-        for field in self.query_config['field_instructions']:
+        for field in self.prompt_config['field_instructions']:
             if chain_order := field.get('chain_order'):
                 chains.append(chain_order)
 
         # Now check if the length of task, example, reasoning if present and output match the chain order
-        if len(chains) != len(self._parse_json(self.query_config.get('task', ''))):
+        if len(chains) != len(self._parse_json(self.prompt_config.get('task', ''))):
             raise ValueError("Chain order does not match the number of tasks defined in the YAML configuration. This will result in prompt generation errors.")
         
         # Same validation of example if present
-        if 'example' in self.query_config:
-            example = self.query_config['example']
+        if 'example' in self.prompt_config:
+            example = self.prompt_config['example']
             if reasoning := example.get('reasoning'):
                 # Parse reasoning as JSON if it exists
                 reasoning = reasoning.strip().split("\n")
@@ -313,22 +311,22 @@ class VLLMReportParser:
 
         return instructions, json.dumps(json_part, indent=2)
 
-    def _generate_query(self, chain: Optional[int] = None) -> List[str]:
+    def _generate_prompt(self, chain: Optional[int] = None) -> List[str]:
         """
-        Generate the query string based on the prompt method and configuration
+        Generate the prompt string based on the prompt method and configuration
 
         Args:
             chain: Optional chain index for PromptChain method
 
         Returns:
-            A list of strings representing the query components
+            A list of strings representing the prompt components
         """
-        # Initialize query variables for downstream chain construction - necessary for ChatPromptTemplate 
-        query_variables = {}
+        # Initialize prompt variables for downstream chain construction - necessary for ChatPromptTemplate 
+        prompt_variables = {}
         # Build system instructions. Either use the config or default to a generic instruction
-        if 'system_instruction' in self.query_config:
+        if 'system_instruction' in self.prompt_config:
             print("WARNING: using system instruction from config file. This is not recommended.")
-            system_instructions = self.query_config['system_instruction'].strip()
+            system_instructions = self.prompt_config['system_instruction'].strip()
         else:
             print("Building system instruction based on prompt method, which is recommended")
             if self.prompt_method in ["ZeroShot", "OneShot"]:
@@ -355,7 +353,7 @@ class VLLMReportParser:
         # Build field instructions
         field_instructions = []
         chain_indexes = []
-        for idx, field in enumerate(self.query_config['field_instructions'], start=1):
+        for idx, field in enumerate(self.prompt_config['field_instructions'], start=1):
             field_instruction = self._format_field_instruction(field, idx, chain)
             if field_instruction is None:
                 # Skip fields not in the specified chain
@@ -367,24 +365,24 @@ class VLLMReportParser:
         field_instructions = "\n".join(field_instructions)
         
         # Build task instruction
-        task_instructions = self.query_config['task'].strip()
+        task_instructions = self.prompt_config['task'].strip()
         if self.prompt_method == "PromptChain":
             task_instructions, task_variable = self._format_promptchain_instructions(task_instructions, chain_indexes, "task_variable")
         else:
             task_instructions, task_variable = self._format_json_instructions(task_instructions, "task_variable")
         
-        # Store task instructions in query variables for downstream use
-        query_variables['task_variable'] = task_variable
+        # Store task instructions in prompt variables for downstream use
+        prompt_variables['task_variable'] = task_variable
 
         task_instructions = "\n".join([task_instructions])
 
         # Add examples section
         if self.prompt_method != 'ZeroShot':
             example_instructions = {}
-            if 'example' not in self.query_config:
+            if 'example' not in self.prompt_config:
                 raise ValueError("Examples are required for prompt methods other than ZeroShot")
             
-            example = self.query_config["example"]
+            example = self.prompt_config["example"]
             self._validate_example(example)
             example_instructions["user"] = "\n".join([example['input'].strip()])
 
@@ -404,8 +402,8 @@ class VLLMReportParser:
                 example_outcome, example_output_variable = self._format_json_instructions(example_outcome, "example_output_variable")
 
             example_instructions["assistant_output"] = "\n".join([example_outcome])
-            # Store example output variable in query variables for downstream use
-            query_variables["example_output_variable"] = example_output_variable
+            # Store example output variable in prompt variables for downstream use
+            prompt_variables["example_output_variable"] = example_output_variable
         else:
             example_instructions = None
 
@@ -416,11 +414,11 @@ class VLLMReportParser:
         ])
 
         if self.prompt_method in ["ZeroShot", "OneShot"]:
-            final_instructions = "Begin your extraction now. Your response MUST contain valid JSON: ```json"
+            final_instructions = "Begin your extraction now. Your response MUST only contain valid JSON and no thinking starting with: ```json"
         elif self.prompt_method in ["CoT", "SelfConsistency", "PromptChain"]:
-            final_instructions = "Begin your extraction now. First, reason step-by-step to identify each required field. After reasoning, output ONLY the final structured data and ensure your response starts with: ```json"
+            final_instructions = "Begin your extraction now. First, reason step-by-step to identify each required field. After reasoning, output ONLY the final structured data and ensure your response contains valid JSON starting with: ```json"
 
-        return system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, query_variables
+        return system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, prompt_variables
 
     def _generate_prompt_self_consistency(self) -> List[str]:
         """
@@ -429,8 +427,8 @@ class VLLMReportParser:
         Returns:    
             Formatted prompt string for Self-Consistency
         """
-        # Initialize query variables for downstream chain construction - necessary for ChatPromptTemplate
-        query_variables = {}
+        # Initialize prompt variables for downstream chain construction - necessary for ChatPromptTemplate
+        prompt_variables = {}
 
         # Build system instructions
         system_instruction = "\n".join([
@@ -445,17 +443,17 @@ class VLLMReportParser:
 
         # Build field instructions
         field_instructions = []
-        for idx, field in enumerate(self.query_config['field_instructions'], start=1):
+        for idx, field in enumerate(self.prompt_config['field_instructions'], start=1):
             field_instructions.append(self._format_field_instruction(field, idx))
 
         field_instructions = "\n".join(field_instructions)
 
         # Build task instruction
-        task_instructions = self.query_config['task'].strip()
+        task_instructions = self.prompt_config['task'].strip()
         task_instructions, task_variable = self._format_json_instructions(task_instructions, "task_variable")
         
-        # Store task instructions in query variables for downstream use
-        query_variables['task_variable'] = task_variable
+        # Store task instructions in prompt variables for downstream use
+        prompt_variables['task_variable'] = task_variable
 
         task_instructions = "\n".join([task_instructions])
 
@@ -478,7 +476,7 @@ class VLLMReportParser:
 
         final_instructions = "Begin reconciliation now. First, review all reasoning paths and identify the most consistent and well-supported value for each required field. After reasoning, output ONLY the final structured data and ensure your response starts with: ```json"
 
-        return system_instruction, field_instructions, task_instructions, report_instructions, candidate_instructions, final_instructions, query_variables
+        return system_instruction, field_instructions, task_instructions, report_instructions, candidate_instructions, final_instructions, prompt_variables
 
     def process_reports(self, reports: List[str], patients: List[str]) -> List[Dict[str, Any]]:
         """Process all reports
@@ -493,12 +491,12 @@ class VLLMReportParser:
         logging.info(f"Stating generating prompt using {self.prompt_method} method")
         if self.prompt_method == "PromptChain":
             if self.chains is None:
-                raise ValueError("PromptChain method requires chain definitions in the query configuration")
+                raise ValueError("PromptChain method requires chain definitions in the prompt configuration")
             
             # Generate prompts for each chain
             prompt_templates = []
             for chain in self.chains:
-                system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, query_variables = self._generate_query(chain=chain)
+                system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, prompt_variables = self._generate_prompt(chain=chain)
                 prompt = [
                     SystemMessage(system_instructions, name="system_instructions"),
                     HumanMessage(field_instructions, name="field_instructions"),
@@ -522,13 +520,13 @@ class VLLMReportParser:
                     HumanMessage(final_instructions, name="final_instructions")
                 ])
                 prompt_template = ChatPromptTemplate(prompt)
-                prompt_template = prompt_template.partial(**query_variables)
+                prompt_template = prompt_template.partial(**prompt_variables)
 
                 prompt_templates.append(prompt_template)
             
             # TODO: Implement chain processing for PromptChain method with memory
         else:
-            system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, query_variables = self._generate_query(chain=None)
+            system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, prompt_variables = self._generate_prompt(chain=None)
             prompt = [
                 SystemMessage(system_instructions),
                 HumanMessage(field_instructions, name="field_instructions"),
@@ -552,12 +550,12 @@ class VLLMReportParser:
                 HumanMessage(final_instructions, name="final_instructions")
             ])
             prompt_template = ChatPromptTemplate(prompt)
-            prompt_template = prompt_template.partial(**query_variables)
+            prompt_template = prompt_template.partial(**prompt_variables)
             chain = prompt_template | self.llm
 
             if self.prompt_method == "SelfConsistency":
                 # For SelfConsistency, we will generate a follow-up prompt
-                system_instruction, field_instructions, task_instructions, report_instructions, candidate_instructions, final_instructions, query_variables = self._generate_prompt_self_consistency()
+                system_instruction, field_instructions, task_instructions, report_instructions, candidate_instructions, final_instructions, prompt_variables = self._generate_prompt_self_consistency()
                 follow_up_prompt_template = ChatPromptTemplate([
                     SystemMessage(system_instruction, name="system_instructions"),
                     HumanMessage(field_instructions, name="field_instructions"),
@@ -574,7 +572,7 @@ class VLLMReportParser:
                 follow_up_prompt_template.extend([
                     HumanMessage(final_instructions, name="final_instructions")
                 ])
-                follow_up_prompt_template = follow_up_prompt_template.partial(**query_variables)
+                follow_up_prompt_template = follow_up_prompt_template.partial(**prompt_variables)
                 ensemble_chain = follow_up_prompt_template | self.llm
 
         logging.info("Starting report processing...")

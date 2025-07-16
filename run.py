@@ -28,19 +28,19 @@ def main():
         help="Output file path"
     )
     parser.add_argument(
-        "-pr",
+        "-pm",
         "--prompt-method",
         required=True,
         choices=["ZeroShot", "OneShot", "CoT", "SelfConsistency", "PromptChain"],
         type=str,
-        help="Path to YAML config for query definitions"
+        help="prompting method"
     )
     parser.add_argument(
-        "-q",
-        "--query-config",
+        "-pc",
+        "--prompt-config",
         required=True,
         type=str,
-        help="Path to YAML config for query definitions"
+        help="Path to YAML config for prompt definitions"
     )
     parser.add_argument(
         "-pa",
@@ -114,12 +114,12 @@ def main():
     # Load model parameters from config file
     params_config = load_config(args.params_config)
 
-    # Load query configuration
-    query_config = load_config(args.query_config)
+    # Load prompt configuration
+    prompt_config = load_config(args.prompt_config)
 
     # Initialize parser
     report_parser = VLLMReportParser(
-        query_config=query_config,
+        prompt_config=prompt_config,
         params_config=params_config,
         base_url=args.base_url,
         api_key=args.api_key,

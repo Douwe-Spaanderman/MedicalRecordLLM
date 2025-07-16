@@ -166,3 +166,4 @@ venv/*
 
 experiment/*
 experiments/*
+setup.sh
