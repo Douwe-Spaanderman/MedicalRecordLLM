@@ -1,12 +1,13 @@
 import json
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 import logging
 from adapters.base_adapter import BaseAdapter
 from collections import OrderedDict
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import Runnable
 from pydantic import create_model, BaseModel, Field
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -478,16 +479,13 @@ class VLLMReportParser:
 
         return system_instruction, field_instructions, task_instructions, report_instructions, candidate_instructions, final_instructions, prompt_variables
 
-    def process_reports(self, reports: List[str], patients: List[str]) -> List[Dict[str, Any]]:
-        """Process all reports
-
-        Args:
-            reports: List of report strings to process
-            patients: List of patient identifiers corresponding to each report
+    def _generate_chat_chain(self) -> Union[Runnable, List[Runnable]]:
+        """
+        Generate the chat chain based on the prompt method and configuration
 
         Returns:
-            List of dictionaries with extracted data from each report
-        """       
+            Runnable chain for processing reports
+        """
         logging.info(f"Stating generating prompt using {self.prompt_method} method")
         if self.prompt_method == "PromptChain":
             if self.chains is None:
@@ -551,7 +549,7 @@ class VLLMReportParser:
             ])
             prompt_template = ChatPromptTemplate(prompt)
             prompt_template = prompt_template.partial(**prompt_variables)
-            chain = prompt_template | self.llm
+            chat_chain = prompt_template | self.llm
 
             if self.prompt_method == "SelfConsistency":
                 # For SelfConsistency, we will generate a follow-up prompt
@@ -574,9 +572,29 @@ class VLLMReportParser:
                 ])
                 follow_up_prompt_template = follow_up_prompt_template.partial(**prompt_variables)
                 ensemble_chain = follow_up_prompt_template | self.llm
+                # TODO: Implement ensemble logic for SelfConsistency method
+            
+        return chat_chain
+
+    def process_reports(self, chat_chain: Union[Runnable, List[Runnable]], reports: List[str], patients: List[str]) -> List[Dict[str, Any]]:
+        """Process all reports
+
+        Args:
+            chat_chain: Runnable chain for processing reports
+            reports: List of report strings to process
+            patients: List of patient identifiers corresponding to each report
+
+        Returns:
+            List of dictionaries with extracted data from each report
+        """       
+        
 
         logging.info("Starting report processing...")
         responses = []
+        inputs = [{"report": r, "patient": p} for r, p in zip(reports, patients)]
+        responses = chat_chain.batch(inputs) 
+        import ipdb; ipdb.set_trace()
+
         for i, (report, patient) in enumerate(zip(reports, patients)):
             logging.info(f"Processing report {i+1}/{len(reports)} for patient {patient}")
 
@@ -594,7 +612,7 @@ class VLLMReportParser:
 
                 response = ensemble_chain.invoke({"report": report, "patient": patient})   
             else:
-                response = chain.invoke({"report": report, "patient": patient})
+                response = chat_chain.invoke({"report": report, "patient": patient})
                 import ipdb; ipdb.set_trace()
 
         return responses
