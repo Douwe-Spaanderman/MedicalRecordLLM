@@ -1,16 +1,69 @@
 import json
 import re
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, List, Any, Optional, Union, Tuple
 import logging
 from adapters.base_adapter import BaseAdapter
 from collections import OrderedDict
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, AIMessagePromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
+from langchain_core.output_parsers import BaseOutputParser
 from pydantic import create_model, BaseModel, Field
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+class ReasoningAndDynamicJSONParser(BaseOutputParser):
+    def __init__(self, output_format: Dict[str, Any]):
+        # Build pydantic fields dynamically from output_format
+        fields = {}
+        for key, val in output_format.items():
+            field_type = val["type"]
+            default = val.get("default", None)
+
+            if field_type == "string":
+                typ = Optional[str]
+            elif field_type == "list":
+                typ = Optional[List[str]]
+            elif field_type == "int":
+                typ = Optional[int]
+            else:
+                typ = Optional[Any]
+
+            fields[key] = (typ, Field(default=default, description=str(val.get("options", ""))))
+
+        self._output_model = create_model("ExtractedData", **fields)
+
+    def parse(self, text: str) -> Dict[str, Any]:
+        # Extract <think>...</think>
+        reasoning_match = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
+        reasoning = reasoning_match.group(1).strip() if reasoning_match else None
+
+        # Extract all ```json ... ``` blocks
+        json_blocks = re.findall(r'```json\s*(?P<json>{.*?})\s*```', text, re.DOTALL)
+
+        # Fallback to any { ... } block
+        if not json_blocks:
+            fallback_blocks = re.findall(r'(?P<json>{.*?})', text, re.DOTALL)
+            json_blocks = fallback_blocks
+
+        extracted_data = None
+        for block in reversed(json_blocks):
+            try:
+                data = json.loads(block.strip())
+                extracted_data = self._output_model(**data).dict()
+                break
+            except Exception:
+                continue
+
+        if extracted_data is None:
+            print(text)
+            logging.error("No valid JSON block matching schema found.")
+
+        return {
+            "reasoning": reasoning,
+            "extracted_data": extracted_data,
+        }
 
 class VLLMReportParser:
     def __init__(
@@ -64,6 +117,9 @@ class VLLMReportParser:
         if self.verbose:
             import langchain
             langchain.verbose = True
+
+        # Generate the chat chain based on the prompt method
+        self.chat_chain = self._generate_chat_chain()
 
     def _load_patterns(self, patterns_path: str) -> Optional[Dict]:
         """Load and compile regex patterns from JSON file"""
@@ -166,22 +222,27 @@ class VLLMReportParser:
         else:
             return list(set(chains))  # Return unique chain orders
 
-    def _format_field_instruction(self, field: Dict[str, str], index: int, chain: Optional[int] = None) -> str:
+    def _format_field_instruction(self, field: Dict[str, str], index: int, chain: Optional[int] = None, output_format: Dict[str, str] = {}) -> Tuple[str, dict]:
         """Convert YAML field config into numbered instruction format
 
         Args:
             field: Field configuration dictionary
             index: Index for numbering the field
             chain: Optional chain order to filter fields
+
+        Returns:
+            Formatted field instruction string
         """
         # Skip field instruction not in chain if chain is specified
         if chain is not None and field.get('chain_order') != chain:
             return None
 
         instruction = [f'{index}. "{field["name"]}":']
+        output_format[field['name']] = {}
         
-        # Only add type when non-obvious
+        # Add type
         instruction.append(f'   - Type: {field["type"]}')
+        output_format[field['name']]['type'] = field['type']
         
         # Add constraints if present
         if 'constraints' in field:
@@ -207,9 +268,11 @@ class VLLMReportParser:
             instruction.append(
                 f'   - Must be EXACTLY one of the following options: [{opts}]. Please enter the value exactly as shown, without any variations.'
             )
+            output_format[field['name']]['options'] = field['options']
         
         # Handle dict structures
         if field['type'] in ['dictionary', 'list of dictionaries'] and 'structure' in field:
+            # TODO this is not correctly formatted now in output_format I think
             subfields = ', '.join(f'"{sf["key"]}"' for sf in field['structure'])
             if field['type'] == 'dictionary':
                 instruction.append(f'   - Expected structure keys: {subfields}')
@@ -230,6 +293,7 @@ class VLLMReportParser:
         
         # Handle default values
         default_value = field.get('default', 'Not specified')
+        output_format[field['name']]['default'] = default_value
         if isinstance(default_value, (dict, list)):
             # Compact formatting for empty lists
             if isinstance(default_value, list) and not default_value:
@@ -247,7 +311,7 @@ class VLLMReportParser:
         else:
             instruction.append(f'   - Default: "{default_value}"')
         
-        return '\n'.join(instruction)
+        return '\n'.join(instruction), output_format
 
     def _format_promptchain_instructions(self, instructions: str, chain_indexes: List[int], variable_name:str) -> str:
         """
@@ -354,8 +418,9 @@ class VLLMReportParser:
         # Build field instructions
         field_instructions = []
         chain_indexes = []
+        output_format = {}
         for idx, field in enumerate(self.prompt_config['field_instructions'], start=1):
-            field_instruction = self._format_field_instruction(field, idx, chain)
+            field_instruction, output_format = self._format_field_instruction(field, idx, chain, output_format)
             if field_instruction is None:
                 # Skip fields not in the specified chain
                 continue
@@ -365,7 +430,7 @@ class VLLMReportParser:
 
         field_instructions = "\n".join(field_instructions)
         
-        # Build task instruction
+        # Build task instruction # TODO should also be easily possible to construct this from output_format
         task_instructions = self.prompt_config['task'].strip()
         if self.prompt_method == "PromptChain":
             task_instructions, task_variable = self._format_promptchain_instructions(task_instructions, chain_indexes, "task_variable")
@@ -415,11 +480,17 @@ class VLLMReportParser:
         ])
 
         if self.prompt_method in ["ZeroShot", "OneShot"]:
-            final_instructions = "Begin your extraction now. Your response MUST only contain valid JSON and no thinking starting with: ```json"
+            final_instructions = (
+                "Begin the extraction now. Your response must contain only a single valid JSON block, "
+                "enclosed in triple backticks and prefixed with `json`, like this: ```json ... ```"
+            )
         elif self.prompt_method in ["CoT", "SelfConsistency", "PromptChain"]:
-            final_instructions = "Begin your extraction now. First, reason step-by-step to identify each required field. After reasoning, output ONLY the final structured data and ensure your response contains valid JSON starting with: ```json"
-
-        return system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, prompt_variables
+            final_instructions = (
+                "Begin the extraction now. First, reason step-by-step to identify and justify the value for each required field, "
+                "enclosed within <think>...</think> tags. Then, output only the final structured data as a single valid JSON block, "
+                "starting with ```json and ending with ```."
+            )
+        return system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, prompt_variables, output_format
 
     def _generate_prompt_self_consistency(self) -> List[str]:
         """
@@ -444,8 +515,10 @@ class VLLMReportParser:
 
         # Build field instructions
         field_instructions = []
+        output_format = {}
         for idx, field in enumerate(self.prompt_config['field_instructions'], start=1):
-            field_instructions.append(self._format_field_instruction(field, idx))
+            field_instruction, output_format = self._format_field_instruction(field, output_format=output_format)
+            field_instructions.append(field_instruction)
 
         field_instructions = "\n".join(field_instructions)
 
@@ -475,9 +548,13 @@ class VLLMReportParser:
                 "response": response_placeholder
             }
 
-        final_instructions = "Begin reconciliation now. First, review all reasoning paths and identify the most consistent and well-supported value for each required field. After reasoning, output ONLY the final structured data and ensure your response starts with: ```json"
+        final_instructions = (
+            "Begin reconciliation now. First, review all reasoning paths and determine the most consistent, well-supported value "
+            "for each required field, reasoning step-by-step within <think>...</think> tags. Then output ONLY the final structured data "
+            "as a valid JSON block, starting with ```json and ending with ```."
+        )
 
-        return system_instruction, field_instructions, task_instructions, report_instructions, candidate_instructions, final_instructions, prompt_variables
+        return system_instruction, field_instructions, task_instructions, report_instructions, candidate_instructions, final_instructions, prompt_variables, output_format
 
     def _generate_chat_chain(self) -> Union[Runnable, List[Runnable]]:
         """
@@ -494,7 +571,7 @@ class VLLMReportParser:
             # Generate prompts for each chain
             prompt_templates = []
             for chain in self.chains:
-                system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, prompt_variables = self._generate_prompt(chain=chain)
+                system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt(chain=chain)
                 prompt = [
                     SystemMessage(system_instructions, name="system_instructions"),
                     HumanMessage(field_instructions, name="field_instructions"),
@@ -524,11 +601,11 @@ class VLLMReportParser:
             
             # TODO: Implement chain processing for PromptChain method with memory
         else:
-            system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, prompt_variables = self._generate_prompt(chain=None)
+            system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt(chain=None)
             prompt = [
                 SystemMessage(system_instructions),
                 HumanMessage(field_instructions, name="field_instructions"),
-                HumanMessage(task_instructions, name="task_instructions"),
+                HumanMessagePromptTemplate.from_template(task_instructions, name="task_instructions"),
             ]
 
             if example_instructions:
@@ -540,20 +617,22 @@ class VLLMReportParser:
                         AIMessage(example_instructions["assistant_reasoning"], name="example_assistant_reasoning"),
                     ])
                 prompt.extend([
-                    AIMessage(example_instructions["assistant_output"], name="example_assistant_output")
+                    AIMessagePromptTemplate.from_template(example_instructions["assistant_output"], name="example_assistant_output")
                 ])
 
             prompt.extend([
-                HumanMessage(report_instructions, name="report_instructions"),
+                HumanMessagePromptTemplate.from_template(report_instructions, name="report_instructions"),
                 HumanMessage(final_instructions, name="final_instructions")
             ])
             prompt_template = ChatPromptTemplate(prompt)
             prompt_template = prompt_template.partial(**prompt_variables)
-            chat_chain = prompt_template | self.llm
+
+            parser = ReasoningAndDynamicJSONParser(output_format)
+            chat_chain = prompt_template | self.llm | parser
 
             if self.prompt_method == "SelfConsistency":
                 # For SelfConsistency, we will generate a follow-up prompt
-                system_instruction, field_instructions, task_instructions, report_instructions, candidate_instructions, final_instructions, prompt_variables = self._generate_prompt_self_consistency()
+                system_instruction, field_instructions, task_instructions, report_instructions, candidate_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt_self_consistency()
                 follow_up_prompt_template = ChatPromptTemplate([
                     SystemMessage(system_instruction, name="system_instructions"),
                     HumanMessage(field_instructions, name="field_instructions"),
@@ -590,10 +669,9 @@ class VLLMReportParser:
         
 
         logging.info("Starting report processing...")
-        responses = []
         inputs = [{"report": r, "patient": p} for r, p in zip(reports, patients)]
         responses = chat_chain.batch(inputs) 
-        import ipdb; ipdb.set_trace()
+        return responses
 
         for i, (report, patient) in enumerate(zip(reports, patients)):
             logging.info(f"Processing report {i+1}/{len(reports)} for patient {patient}")
@@ -613,7 +691,6 @@ class VLLMReportParser:
                 response = ensemble_chain.invoke({"report": report, "patient": patient})   
             else:
                 response = chat_chain.invoke({"report": report, "patient": patient})
-                import ipdb; ipdb.set_trace()
 
         return responses
 
@@ -628,5 +705,5 @@ class VLLMReportParser:
             Processed results in adapter's output format
         """
         texts, patients = adapter.prepare_inputs()
-        results = self.process_reports(texts, patients)
+        results = self.process_reports(self.chat_chain, texts, patients)
         return adapter.format_outputs(results)
