@@ -1,15 +1,18 @@
 import json
 import re
-from typing import Dict, List, Any, Optional, Union, Tuple
+from typing import Dict, List, Any, Optional, Union, Tuple, Iterable
 import logging
+import asyncio
+import time
+from math import ceil
 from adapters.base_adapter import BaseAdapter
 from collections import OrderedDict
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, AIMessagePromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_core.runnables import Runnable
 from langchain_core.output_parsers import BaseOutputParser
-from pydantic import create_model, BaseModel, Field
+from pydantic import create_model, Field
+import backoff
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -33,6 +36,7 @@ class ReasoningAndDynamicJSONParser(BaseOutputParser):
             fields[key] = (typ, Field(default=default, description=str(val.get("options", ""))))
 
         self._output_model = create_model("ExtractedData", **fields)
+        self.logger = logging.getLogger(__name__)
 
     def parse(self, text: str) -> Dict[str, Any]:
         # Extract <think>...</think>
@@ -57,8 +61,7 @@ class ReasoningAndDynamicJSONParser(BaseOutputParser):
                 continue
 
         if extracted_data is None:
-            print(text)
-            logging.error("No valid JSON block matching schema found.")
+            self.logger.error("Failed to parse JSON block or no valid JSON found.")
 
         return {
             "reasoning": reasoning,
@@ -114,12 +117,14 @@ class VLLMReportParser:
         self.patterns = self._load_patterns(patterns_path) if patterns_path else None
         self.save_raw_output = save_raw_output
         self.verbose = verbose
+        self.logger = logging.getLogger(__name__)
         if self.verbose:
             import langchain
             langchain.verbose = True
+            self.logger.setLevel(logging.DEBUG)
 
-        # Generate the chat chain based on the prompt method
-        self.chat_chain = self._generate_chat_chain()
+        # Generate the chat chains based on the prompt method
+        self._generate_chat_chain()
 
     def _load_patterns(self, patterns_path: str) -> Optional[Dict]:
         """Load and compile regex patterns from JSON file"""
@@ -128,7 +133,7 @@ class VLLMReportParser:
                 patterns = json.load(f)
             return self._compile_patterns(patterns)
         except Exception as e:
-            logging.error(f"Error loading patterns: {e}")
+            self.logger.error(f"Error loading patterns: {e}")
             return None
 
     def _compile_patterns(self, patterns: Dict) -> Dict:
@@ -146,7 +151,7 @@ class VLLMReportParser:
                     'start': pat.get('start', 0)
                 }
             except Exception as e:
-                logging.error(f"Error compiling pattern {name}: {e}")
+                self.logger.error(f"Error compiling pattern {name}: {e}")
         return compiled
 
     def _extract_text(self, text: str) -> str:
@@ -162,7 +167,7 @@ class VLLMReportParser:
                     start = max(match.start(), pattern['start'])
                     extracted.append(text[start:match.end()])
             except Exception as e:
-                logging.error(f"Error applying pattern {pattern['pattern']}: {e}")
+                self.logger.error(f"Error applying pattern {pattern['pattern']}: {e}")
         
         return "\n".join(extracted) if extracted else text
 
@@ -176,7 +181,7 @@ class VLLMReportParser:
                 except json.JSONDecodeError:
                     continue  # Try the next candidate      
         except Exception as e:
-            logging.warning(f"JSON extraction failed: {e}")
+            self.logger.warning(f"JSON extraction failed: {e}")
             
         return None
 
@@ -390,10 +395,10 @@ class VLLMReportParser:
         prompt_variables = {}
         # Build system instructions. Either use the config or default to a generic instruction
         if 'system_instruction' in self.prompt_config:
-            print("WARNING: using system instruction from config file. This is not recommended.")
+            self.logger.warning("System instruction found in config file. This is not recommended for production use.")
             system_instructions = self.prompt_config['system_instruction'].strip()
         else:
-            print("Building system instruction based on prompt method, which is recommended")
+            self.logger.debug("System instruction not found in config file. Using default system instruction, which is recommended")
             if self.prompt_method in ["ZeroShot", "OneShot"]:
                 system_instructions = [
                     "You are a medical data extraction system that ONLY outputs valid JSON. Maintain strict compliance with these rules:",
@@ -556,14 +561,14 @@ class VLLMReportParser:
 
         return system_instruction, field_instructions, task_instructions, report_instructions, candidate_instructions, final_instructions, prompt_variables, output_format
 
-    def _generate_chat_chain(self) -> Union[Runnable, List[Runnable]]:
+    def _generate_chat_chain(self) -> None:
         """
         Generate the chat chain based on the prompt method and configuration
 
         Returns:
             Runnable chain for processing reports
         """
-        logging.info(f"Stating generating prompt using {self.prompt_method} method")
+        self.logger.info(f"Stating generating prompt using {self.prompt_method} method")
         if self.prompt_method == "PromptChain":
             if self.chains is None:
                 raise ValueError("PromptChain method requires chain definitions in the prompt configuration")
@@ -628,7 +633,7 @@ class VLLMReportParser:
             prompt_template = prompt_template.partial(**prompt_variables)
 
             parser = ReasoningAndDynamicJSONParser(output_format)
-            chat_chain = prompt_template | self.llm | parser
+            self.chat_chain = prompt_template | self.llm | parser
 
             if self.prompt_method == "SelfConsistency":
                 # For SelfConsistency, we will generate a follow-up prompt
@@ -650,49 +655,193 @@ class VLLMReportParser:
                     HumanMessage(final_instructions, name="final_instructions")
                 ])
                 follow_up_prompt_template = follow_up_prompt_template.partial(**prompt_variables)
-                ensemble_chain = follow_up_prompt_template | self.llm
+                self.ensemble_chain = follow_up_prompt_template | self.llm
                 # TODO: Implement ensemble logic for SelfConsistency method
-            
-        return chat_chain
 
-    def process_reports(self, chat_chain: Union[Runnable, List[Runnable]], reports: List[str], patients: List[str]) -> List[Dict[str, Any]]:
-        """Process all reports
+    @staticmethod
+    def _dynamic_chunks(inputs: List[Dict], batch_size: int = 32, max_tokens: int = 16000) -> Iterable[List[Dict]]:
+        """
+        Dynamic batching that considers both item count and approximate token size
 
         Args:
-            chat_chain: Runnable chain for processing reports
-            reports: List of report strings to process
-            patients: List of patient identifiers corresponding to each report
+            inputs: List of input dictionaries to process
+            batch_size: Number of items in a batch
+            max_tokens: Maximum token count for the batch (approximate)
+            
+        Yields:
+            Iterable of input lists, each representing a batch of inputs
+        """
+        current_batch = []
+        current_batch_size = 0
+        
+        for item in inputs:
+            # Estimate token count (adjust based on your average token/report ratio)
+            approx_tokens = len(item['report']) // 4  # Rough estimate: 1 token ≈ 4 chars
+            item_size = max(1, ceil(approx_tokens / 1000))  # Convert to "size units" (1 = ~1000 tokens)
+            
+            # Handle single items that exceed max_tokens
+            if approx_tokens > max_tokens:
+                logging.warning(
+                    f"Single input exceeds max_tokens ({approx_tokens} > {max_tokens}). "
+                    f"Processing as single-item batch. "
+                    f"Patient: {item.get('patient', 'unknown')}, at index: {item.get('index', 'unknown')}"
+                )
+                if current_batch:
+                    yield current_batch
+                    current_batch = []
+                    current_batch_size = 0
+                yield [item]
+                continue
+
+            # Start new batch if adding this item would exceed limits
+            if (current_batch and 
+                (len(current_batch) >= batch_size or 
+                 current_batch_size + item_size > max_tokens // 1000)):
+                yield current_batch
+                current_batch = []
+                current_batch_size = 0
+                
+            current_batch.append(item)
+            current_batch_size += item_size
+            
+        if current_batch:
+            yield current_batch
+
+    @backoff.on_exception(backoff.expo, Exception, max_tries=3, jitter=backoff.full_jitter)
+    async def _process_chunk(self, chunk_inputs: List[Dict], chunk_num: int, total_chunks: int) -> List[Any]:
+        """
+        Process a single chunk
+        
+        Args:
+            chunk_inputs: List of input dictionaries to process in this chunk
+            chunk_num: Current chunk number (for logging)
+            total_chunks: Total number of chunks (for logging)
 
         Returns:
-            List of dictionaries with extracted data from each report
-        """       
+            List of processed results from the chunk
+        """
+        self.logger.info(f"Processing chunk {chunk_num}/{total_chunks} (size: {len(chunk_inputs)})")
+        start_time = time.time()
         
+        try:
+            results = await self.chat_chain.abatch(chunk_inputs)
+            elapsed = time.time() - start_time
+            self.logger.debug(f"Chunk {chunk_num} completed in {elapsed:.2f}s "
+                            f"({len(chunk_inputs)/elapsed:.1f} items/sec)")
+            return results
+        except Exception as e:
+            self.logger.error(f"Error processing chunk {chunk_num}: {str(e)}")
+            return [None] * len(chunk_inputs)
+        
+    async def _abatch_chunked(self, inputs: List[Dict], batch_size: int = 32, max_concurrent: int = 6) -> List[Any]:
+        """
+        Optimized async batch processing
 
-        logging.info("Starting report processing...")
-        inputs = [{"report": r, "patient": p} for r, p in zip(reports, patients)]
-        responses = chat_chain.batch(inputs) 
-        return responses
+        Args:
+            inputs: List of input dictionaries to process
+            batch_size: Size of each batch for processing
+            max_concurrent: Maximum number of concurrent requests to process
 
-        for i, (report, patient) in enumerate(zip(reports, patients)):
-            logging.info(f"Processing report {i+1}/{len(reports)} for patient {patient}")
+        Returns:
+            List of processed results from all chunks
+        """
+        if not inputs:
+            return []
+            
+        # Create chunks using smart batching
+        chunks = list(self._dynamic_chunks(inputs, batch_size))
+        total_chunks = len(chunks)
+        self.logger.info(f"Processing {len(inputs)} items in {total_chunks} optimized chunks")
+        
+        # Process chunks with concurrency control
+        semaphore = asyncio.Semaphore(max_concurrent)  # Limit concurrent requests
+        
+        async def process_with_semaphore(chunk, chunk_num):
+            async with semaphore:
+                return await self._process_chunk(chunk, chunk_num, total_chunks)
+        
+        tasks = [process_with_semaphore(chunk, i+1) for i, chunk in enumerate(chunks)]
+        results = []
+        
+        for i, future in enumerate(asyncio.as_completed(tasks), 1):
+            chunk_results = await future
+            results.extend(chunk_results)
+            self.logger.debug(f"Completed {i}/{total_chunks} chunks")
+        
+        return results
+    
+    def run_batch(self, reports: List[str], patients: List[str], batch_size: int = 32) -> List[Any]:
+        """
+        Run batch processing of reports with async support
 
-            if self.prompt_method == "PromptChain":
-                raise NotImplementedError("PromptChain method is not yet implemented for processing multiple reports in a single call.")
-            elif self.prompt_method == "SelfConsistency":
-                raise NotImplementedError("SelfConsistency method is not yet implemented for processing multiple reports in a single call.")
-                # For SelfConsistency, we need to generate multiple candidate outputs
-                candidate_outputs = []
-                for j in range(self.self_consistency_sampling.get('num_samples', 3)):
-                    logging.info(f"Generating candidate output {j+1} for report {i+1}")
-                    self.llm = self.self_consistency_sampling.get('temperature', [0.3, 0.5, 0.7])[j % len(self.self_consistency_sampling['temperature'])]  # Cycle through temperatures
-                    response = chain.invoke({"report": report, "patient": patient})
-                    candidate_outputs.append(response)
+        Args:
+            reports: List of report strings to process
+            patients: List of patient identifiers corresponding to each report
+            batch_size: Size of each batch for processing
+            
+        Returns:
+            List of processed results from all reports
+        """
+        start_time = time.time()
+        self.logger.info(f"Starting batch processing of {len(reports)} items")
+        
+        try:
+            if len(reports) != len(patients):
+                raise ValueError("Reports and patients lists must be of equal length")
+                
+            inputs = [
+                {"report": r, "patient": p, "index": i}
+                for i, (r, p) in enumerate(zip(reports, patients))
+            ]
 
-                response = ensemble_chain.invoke({"report": report, "patient": patient})   
-            else:
-                response = chat_chain.invoke({"report": report, "patient": patient})
+            # Order inputs based on length of reports for speedup batching
+            inputs.sort(key=lambda x: len(x["report"]))
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            outputs = loop.run_until_complete(self._abatch_chunked(inputs, batch_size))
+            
+            # Map results back to original index of input
+            results = [None] * len(inputs)
+            for inp, result in zip(inputs, outputs):
+                results[inp["index"]] = result
 
-        return responses
+            elapsed = time.time() - start_time
+            self.logger.info(f"Batch processing completed in {elapsed:.2f} seconds "
+                           f"({len(reports)/elapsed:.1f} items/sec)")
+            return results
+        except Exception as e:
+            self.logger.error(f"Batch processing failed: {str(e)}")
+            raise
+        finally:
+            loop.close()
+
+    # Optional synchronous batch processing alternative
+    def run_batch_sync(self, reports: List[str], patients: List[str], batch_size: int = 32) -> List[Any]:
+        """
+        Synchronous version for environments where async isn't possible
+        Note: This is less efficient than the async version and not recommended for large datasets
+        
+        Args:
+            reports: List of report strings to process
+            patients: List of patient identifiers corresponding to each report
+            batch_size: Size of each batch for processing
+
+        Returns:
+            List of processed results from all reports
+        """
+        inputs = [
+            {"report": r, "patient": p, "index": i}
+            for i, (r, p) in enumerate(zip(reports, patients))
+        ]
+        outputs = [
+            result for chunk in self._chunks(inputs, batch_size)
+            for result in self.chat_chain.batch(chunk)
+        ]
+        results = [None] * len(inputs)
+        for inp, result in zip(inputs, outputs):
+            results[inp["index"]] = result
+        return results
 
     def process_with_adapter(self, adapter: BaseAdapter) -> Any:
         """
@@ -705,5 +854,5 @@ class VLLMReportParser:
             Processed results in adapter's output format
         """
         texts, patients = adapter.prepare_inputs()
-        results = self.process_reports(self.chat_chain, texts, patients)
+        results = self.run_batch(texts, patients)
         return adapter.format_outputs(results)
