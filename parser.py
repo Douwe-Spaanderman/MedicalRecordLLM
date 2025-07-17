@@ -36,7 +36,7 @@ class ReasoningAndDynamicJSONParser(BaseOutputParser):
             fields[key] = (typ, Field(default=default, description=str(val.get("options", ""))))
 
         self._output_model = create_model("ExtractedData", **fields)
-        self.logger = logging.getLogger(__name__)
+        self._logger = logging.getLogger(__name__)
 
     def parse(self, text: str) -> Dict[str, Any]:
         # Extract <think>...</think>
@@ -61,7 +61,7 @@ class ReasoningAndDynamicJSONParser(BaseOutputParser):
                 continue
 
         if extracted_data is None:
-            self.logger.error("Failed to parse JSON block or no valid JSON found.")
+            self._logger.error("Failed to parse JSON block or no valid JSON found.")
 
         return {
             "reasoning": reasoning,
@@ -726,7 +726,7 @@ class VLLMReportParser:
         try:
             results = await self.chat_chain.abatch(chunk_inputs)
             elapsed = time.time() - start_time
-            self.logger.debug(f"Chunk {chunk_num} completed in {elapsed:.2f}s "
+            self.logger.info(f"Chunk {chunk_num} completed in {elapsed:.2f}s "
                             f"({len(chunk_inputs)/elapsed:.1f} items/sec)")
             return results
         except Exception as e:
