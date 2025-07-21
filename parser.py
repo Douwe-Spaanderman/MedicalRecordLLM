@@ -12,9 +12,31 @@ from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplat
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import BaseOutputParser
 from pydantic import create_model, Field
+from functools import wraps
 import backoff
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+def backoff_except_timeout(max_tries: int = 3):
+    """
+    Decorator to apply exponential backoff on exceptions, excluding asyncio.TimeoutError.
+    This is useful for retrying operations that may fail due to transient issues,
+    """
+    def decorator(func):
+        @backoff.on_exception(
+            backoff.expo,
+            Exception,
+            max_tries=max_tries,
+            jitter=backoff.full_jitter,
+        )
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            try:
+                return await func(*args, **kwargs)
+            except asyncio.TimeoutError:
+                raise
+        return wrapper
+    return decorator
 
 class ReasoningAndDynamicJSONParser(BaseOutputParser):
     def __init__(self, output_format: Dict[str, Any]):
@@ -708,6 +730,34 @@ class VLLMReportParser:
             yield current_batch
 
     @backoff.on_exception(backoff.expo, Exception, max_tries=3, jitter=backoff.full_jitter)
+    async def _fallback_process_items(self, items: List[Dict]) -> List[Any]:
+        """
+        Processes items one by one with short timeout. Returns list of results (None on failure).
+
+        Args:
+            items: List of individual inputs (e.g. from a failed chunk)
+
+        Returns:
+            List of results, one per input (or None on failure)
+        """
+        results = []
+        for item in items:
+            try:
+                result = await asyncio.wait_for(self.chat_chain.abatch([item]), timeout=60)
+                results.append(result[0])  # abatch still returns a list
+            except asyncio.TimeoutError:
+                self.logger.error(
+                    f"[Fallback] Timeout on single input — Patient: {item.get('patient')}, Index: {item.get('index')}"
+                )
+                results.append(None)
+            except Exception as e:
+                self.logger.error(
+                    f"[Fallback] Error on single input — Patient: {item.get('patient')}, Index: {item.get('index')}, Error: {e}"
+                )
+                results.append(None)
+        return results
+
+    @backoff_except_timeout(max_tries=3)
     async def _process_chunk(self, chunk_inputs: List[Dict], chunk_num: int, total_chunks: int) -> List[Any]:
         """
         Process a single chunk
@@ -720,15 +770,22 @@ class VLLMReportParser:
         Returns:
             List of processed results from the chunk
         """
-        self.logger.info(f"Processing chunk {chunk_num}/{total_chunks} (size: {len(chunk_inputs)})")
+        self.logger.info(
+            f"Processing chunk {chunk_num}/{total_chunks} (size: {len(chunk_inputs)}), "
+            f"indices: {[item['index'] for item in chunk_inputs]}, "
+            f"lengths: {[len(item['report']) for item in chunk_inputs]}"
+        )
         start_time = time.time()
         
         try:
-            results = await self.chat_chain.abatch(chunk_inputs)
+            results = await asyncio.wait_for(self.chat_chain.abatch(chunk_inputs), timeout=600)
             elapsed = time.time() - start_time
             self.logger.info(f"Chunk {chunk_num} completed in {elapsed:.2f}s "
-                            f"({len(chunk_inputs)/elapsed:.1f} items/sec)")
+                            f"({len(chunk_inputs)/elapsed:.3f} items/sec)")
             return results
+        except asyncio.TimeoutError:
+            self.logger.warning(f"Chunk {chunk_num} timed out after 600s. Falling back to per-item processing.")
+            return await self._fallback_process_items(chunk_inputs)
         except Exception as e:
             self.logger.error(f"Error processing chunk {chunk_num}: {str(e)}")
             return [None] * len(chunk_inputs)
