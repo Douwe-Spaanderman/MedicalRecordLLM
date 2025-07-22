@@ -90,35 +90,45 @@ def calculate_results(prediction: pd.DataFrame, ground_truth: pd.DataFrame, prom
         raise ValueError("Prediction and ground truth DataFrames must have the same number of rows.")
     
     # Initialize results DataFrame
-    results = pd.DataFrame(index=prediction.index, columns=prediction.columns)
+    results = []
     for field, meta in prompt_config.items():
         # Calculate metrics depending on the field type
         if meta.get("type") == "string":
             if "options" in meta:
-                # Calculate if prediction matches == ground truth
-                results[field] = (prediction[field] == ground_truth[field]).astype(int)
+                # Calculate the mean accuracy and standard deviation for categorical fields
+                scores = (prediction[field] == ground_truth[field]).astype(int)
+                metric_type = "accuracy"
             else:
                 # Semantic similarity for free text
-                results[field] = [
+                scores = pd.Series([
                     calculate_similarity(str(p), str(g), sentence_model)
                     for p, g in zip(prediction[field], ground_truth[field])
-                ]
+                ])
+                metric_type = "semantic_similarity"
         elif meta.get("type") == "list":
             # Ensure both prediction and ground truth are lists
             prediction[field] = prediction[field].apply(lambda x: x if isinstance(x, list) else [])
             ground_truth[field] = ground_truth[field].apply(
                 lambda x: x if isinstance(x, list) else x.split(", ") if isinstance(x, str) else []
             )
-            results[field] = [
+            scores = pd.Series([
                 calculate_list_similarity(p, g, sentence_model)
                 for p, g in zip(prediction[field], ground_truth[field])
-            ]
+            ])
+            metric_type = "list_similarity"
         elif meta.get("type") == "dict":
             raise NotImplementedError("Dictionary type fields are not supported yet.")
         else:
             raise ValueError(f"Unsupported field type for field '{field}': {meta.get('type')}")
         
-    return results
+        results.append({
+            "field": field,
+            "metric_type": metric_type,
+            "mean": scores.mean(),
+            "std": scores.std()
+        })
+
+    return pd.DataFrame(results)
 
 def process_results(LLM_output: Union[pd.DataFrame, str], prompt_config: Union[Dict[str, Any], str], ground_truth: Optional[Union[pd.DataFrame, str]] = None, sentence_model: str = "all-mpnet-base-v2", output_file: Optional[str] = None) -> None:
     """
