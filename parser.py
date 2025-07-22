@@ -729,36 +729,37 @@ class VLLMReportParser:
         if current_batch:
             yield current_batch
 
-    @backoff.on_exception(backoff.expo, Exception, max_tries=3, jitter=backoff.full_jitter)
-    async def _fallback_process_items(self, items: List[Dict]) -> List[Any]:
+    @backoff_except_timeout(max_tries=3)
+    async def _fallback_process_items(self, items: List[Dict], max_concurrent: int = 6, timeout: int = 60) -> List[Any]:
         """
         Processes items one by one with short timeout. Returns list of results (None on failure).
 
         Args:
             items: List of individual inputs (e.g. from a failed chunk)
+            max_concurrent: Maximum number of concurrent requests to process
+            timeout: Timeout for each individual request
 
         Returns:
             List of results, one per input (or None on failure)
         """
-        results = []
-        for item in items:
-            try:
-                result = await asyncio.wait_for(self.chat_chain.abatch([item]), timeout=60)
-                results.append(result[0])  # abatch still returns a list
-            except asyncio.TimeoutError:
-                self.logger.error(
-                    f"[Fallback] Timeout on single input — Patient: {item.get('patient')}, Index: {item.get('index')}"
-                )
-                results.append(None)
-            except Exception as e:
-                self.logger.error(
-                    f"[Fallback] Error on single input — Patient: {item.get('patient')}, Index: {item.get('index')}, Error: {e}"
-                )
-                results.append(None)
-        return results
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def process_one(item):
+            async with semaphore:
+                try:
+                    result = await asyncio.wait_for(self.chat_chain.abatch([item]), timeout=timeout)
+                    return result[0]
+                except asyncio.TimeoutError:
+                    self.logger.warning(f"[Fallback] Timeout for Patient: {item.get('patient')}, Index: {item.get('index')}")
+                    return None
+                except Exception as e:
+                    self.logger.error(f"[Fallback] Failed — Patient: {item.get('patient')}, Index: {item.get('index')}, Error: {e}")
+                    return None
+
+        return await asyncio.gather(*[process_one(item) for item in items])
 
     @backoff_except_timeout(max_tries=3)
-    async def _process_chunk(self, chunk_inputs: List[Dict], chunk_num: int, total_chunks: int) -> List[Any]:
+    async def _process_chunk(self, chunk_inputs: List[Dict], chunk_num: int, total_chunks: int, timeout: int = 600) -> List[Any]:
         """
         Process a single chunk
         
@@ -778,14 +779,14 @@ class VLLMReportParser:
         start_time = time.time()
         
         try:
-            results = await asyncio.wait_for(self.chat_chain.abatch(chunk_inputs), timeout=600)
+            results = await asyncio.wait_for(self.chat_chain.abatch(chunk_inputs), timeout=timeout)
             elapsed = time.time() - start_time
             self.logger.info(f"Chunk {chunk_num} completed in {elapsed:.2f}s "
                             f"({len(chunk_inputs)/elapsed:.3f} items/sec)")
             return results
         except asyncio.TimeoutError:
             self.logger.warning(f"Chunk {chunk_num} timed out after 600s. Falling back to per-item processing.")
-            return await self._fallback_process_items(chunk_inputs)
+            return {"chunk": chunk_inputs, "results": None}
         except Exception as e:
             self.logger.error(f"Error processing chunk {chunk_num}: {str(e)}")
             return [None] * len(chunk_inputs)
@@ -819,12 +820,26 @@ class VLLMReportParser:
         
         tasks = [process_with_semaphore(chunk, i+1) for i, chunk in enumerate(chunks)]
         results = []
+        fallback_items = []
         
         for i, future in enumerate(asyncio.as_completed(tasks), 1):
             chunk_results = await future
-            results.extend(chunk_results)
+            if isinstance(chunk_results, dict) and chunk_results["results"] is None:
+                # Fallback processing for failed chunk
+                self.logger.warning(f"Chunk {i} failed, falling back to individual processing")
+                fallback_items.extend(chunk_results["chunk"])
+                continue
+            else:
+                results.extend(chunk_results)
+            
             self.logger.debug(f"Completed {i}/{total_chunks} chunks")
         
+        # Fallback outside async chunk loop
+        if fallback_items:
+            self.logger.info(f"Processing {len(fallback_items)} items via fallback serially.")
+            fallback_results = await self._fallback_process_items(fallback_items, max_concurrent=max_concurrent)
+            results.extend(fallback_results)
+
         return results
     
     def run_batch(self, reports: List[str], patients: List[str], batch_size: int = 32) -> List[Any]:
