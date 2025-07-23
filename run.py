@@ -98,15 +98,15 @@ def main():
         "-b",
         "--batch-size",
         type=int,
-        default=32,
-        help="Batch size for processing reports (default: 32)"
+        default=16,
+        help="Batch size for processing reports (default: 16)"
     )
     parser.add_argument(
         "-t",
         "--timeout",
         type=int,
-        default=60,
-        help="Timeout for each request in seconds (default: 60)"
+        default=30,
+        help="Timeout for each request in seconds (default: 30)"
     )
     parser.add_argument(
         "-mc",

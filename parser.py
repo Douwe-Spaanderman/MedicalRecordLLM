@@ -101,7 +101,7 @@ class VLLMReportParser:
         api_key: Optional[str] = "DummyAPIKey",
         prompt_method: str = "ZeroShot",
         batch_size: int = 32,
-        timeout: int = 60,
+        timeout: int = 30,
         max_concurrent: int = 6,
         patterns_path: Optional[str] = None,
         save_raw_output: bool = False,
@@ -156,6 +156,13 @@ class VLLMReportParser:
             import langchain
             langchain.verbose = True
             self.logger.setLevel(logging.DEBUG)
+
+        self.logger.info("Initializing VLLMReportParser with the following configuration:")
+        self.logger.info(f"Model: {params_config.get('model')}")
+        self.logger.info(f"Prompt Method: {self.prompt_method}")
+        self.logger.info(f"Batch Size: {self.batch_size}")
+        self.logger.info(f"Timeout: {self.timeout} seconds")
+        self.logger.info(f"Max Concurrent Requests: {self.max_concurrent}")
 
         # Generate the chat chains based on the prompt method
         self._generate_chat_chain()
@@ -901,7 +908,7 @@ class VLLMReportParser:
                 "status": "success"
             } for input_item, llm_result in zip(chunk_inputs, results)]
         except asyncio.TimeoutError:
-            self.logger.warning(f"Chunk {chunk_num} timed out after 600s. Falling back to per-item processing.")
+            self.logger.warning(f"Chunk {chunk_num} timed out after {self.timeout * self.batch_size}. Falling back to per-item processing.")
             return [{
                 "patient": item["patient"],
                 "index": item["index"],
@@ -933,7 +940,7 @@ class VLLMReportParser:
             return []
             
         # Create chunks using smart batching
-        chunks = list(self._dynamic_chunks(inputs, self.batch_size))
+        chunks = list(self._dynamic_chunks(inputs))
         total_chunks = len(chunks)
         self.logger.info(f"Processing {len(inputs)} items in {total_chunks} optimized chunks")
         
@@ -969,7 +976,7 @@ class VLLMReportParser:
         # Process fallback items if any
         if fallback_items:
             self.logger.info(f"Processing {len(fallback_items)} items via fallback serially.")
-            fallback_results = await self._fallback_process_items(fallback_items, max_concurrent=self.max_concurrent)
+            fallback_results = await self._fallback_process_items(fallback_items)
             results.extend(fallback_results)
 
         return results
@@ -1002,7 +1009,7 @@ class VLLMReportParser:
             
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            outputs = loop.run_until_complete(self._abatch_chunked(inputs, self.batch_size))
+            outputs = loop.run_until_complete(self._abatch_chunked(inputs))
             
             # Map results back to original index of input
             outputs.sort(key=lambda x: x["index"])
@@ -1036,7 +1043,7 @@ class VLLMReportParser:
             for i, (r, p) in enumerate(zip(reports, patients))
         ]
         outputs = [
-            result for chunk in self._chunks(inputs, self.batch_size)
+            result for chunk in self._dynamic_chunks(inputs)
             for result in self.chat_chain.batch(chunk)
         ]
         results = [None] * len(inputs)
