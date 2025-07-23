@@ -8,6 +8,7 @@ from math import ceil
 from adapters.base_adapter import BaseAdapter
 from collections import OrderedDict
 from langchain_openai import ChatOpenAI
+from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, AIMessagePromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import BaseOutputParser
@@ -656,7 +657,7 @@ class VLLMReportParser:
             prompt_template = prompt_template.partial(**prompt_variables)
 
             parser = ReasoningAndDynamicJSONParser(output_format)
-            self.chat_chain = prompt_template | self.llm | parser
+            base_chain = prompt_template | self.llm | parser
 
             if self.prompt_method == "SelfConsistency":
                 # For SelfConsistency, we will generate a follow-up prompt
@@ -664,22 +665,94 @@ class VLLMReportParser:
                 follow_up_prompt_template = ChatPromptTemplate([
                     SystemMessage(system_instruction, name="system_instructions"),
                     HumanMessage(field_instructions, name="field_instructions"),
-                    HumanMessage(task_instructions, name="task_instructions"),
-                    HumanMessage(report_instructions, name="report_instructions"),
+                    HumanMessagePromptTemplate.from_template(task_instructions, name="task_instructions"),
                 ])
 
                 for key, value in candidate_instructions.items():
                     follow_up_prompt_template.extend([
-                        AIMessage(value['reasoning'], name=f"candidate_reasoning_{key}"),
-                        AIMessage(value['response'], name=f"candidate_response_{key}")
+                        AIMessagePromptTemplate.from_template(value['reasoning'], name=f"candidate_{key}_reasoning"),
+                        AIMessagePromptTemplate.from_template(value['response'], name=f"candidate_{key}_response")
                     ])
 
                 follow_up_prompt_template.extend([
+                    HumanMessagePromptTemplate.from_template(report_instructions, name="report_instructions"),
                     HumanMessage(final_instructions, name="final_instructions")
                 ])
                 follow_up_prompt_template = follow_up_prompt_template.partial(**prompt_variables)
-                self.ensemble_chain = follow_up_prompt_template | self.llm
-                # TODO: Implement ensemble logic for SelfConsistency method
+                ensemble_chain = follow_up_prompt_template | self.llm | parser
+                self.chat_chain = self._create_self_consistency_chain(base_chain, ensemble_chain)
+            else:
+                # For other methods, we can use the base chain directly
+                self.chat_chain = base_chain
+
+    def _create_self_consistency_chain(self, base_chain: Runnable, ensemble_chain: Runnable) -> Runnable:
+        """
+        Create a chain for Self-Consistency method that generates candidates and processes them with an ensemble model
+
+        Args:
+            base_chain: Base chain for generating candidates
+            ensemble_chain: Chain for processing candidates with an ensemble model
+
+        Returns:
+            Runnable chain for Self-Consistency processing
+        """
+        async def generate_candidates(input_batch: List[Dict]) -> List[Dict]:
+            """
+            Generate multiple candidates for each input using different temperatures
+
+            Args:
+                input_batch: List of input dictionaries to process
+            Returns:
+                List of dictionaries with candidates for each input
+            """
+            candidates_batch = []
+            num_samples = self.self_consistency_sampling.get("num_samples", 3)
+            temperatures = self.self_consistency_sampling.get("temperature", [0.1, 0.3, 0.5])
+            for i in range(num_samples):
+                logging.info(f"Generating candidate {i+1}/{num_samples} with temperature {temperatures[i % len(temperatures)]}")
+                temp = temperatures[i % len(temperatures)]
+                llm_with_temp = base_chain.with_config({"temperature": temp})
+                results = await llm_with_temp.abatch(input_batch)
+
+                if i == 0:
+                    candidates_batch = [{"candidates": [], "original_input": item} for item in input_batch]
+
+                for idx, result in enumerate(results):
+                    candidates_batch[idx]["candidates"].append({
+                        "reasoning": result.get("reasoning", ""),
+                        "response": result.get("parsed_output", {})
+                    })
+            
+            return candidates_batch
+        
+        async def process_with_ensemble(candidates_batch: List[Dict]) -> List[Dict]:
+            """
+            Process the generated candidates using an ensemble model
+
+            Args:
+                candidates_batch: List of dictionaries with candidates for each input
+            Returns:
+                List of dictionaries with final ensemble outputs
+            """
+            ensemble_inputs = []
+            for item in candidates_batch:
+                candidate_instructions = {
+                    str(i): {
+                        "reasoning": candidate["reasoning"],
+                        "response": json.dumps(candidate["response"])
+                    }
+                    for i, candidate in enumerate(item["candidates"])
+                }
+                ensemble_input = {
+                    **item["original_input"],
+                    "candidate_instructions": candidate_instructions
+                }
+                ensemble_inputs.append(ensemble_input)
+            
+            self.logger.info(f"Processing {len(ensemble_inputs)} candidate batches with ensemble model")
+            return await ensemble_chain.abatch(ensemble_inputs)
+
+        return RunnableLambda(generate_candidates) | RunnableLambda(process_with_ensemble)
 
     @staticmethod
     def _dynamic_chunks(inputs: List[Dict], batch_size: int = 32, max_tokens: int = 16000) -> Iterable[List[Dict]]:
