@@ -105,7 +105,7 @@ def main():
         "-t",
         "--timeout",
         type=int,
-        default=30,
+        default=60,
         help="Timeout for each request in seconds (default: 30)"
     )
     parser.add_argument(

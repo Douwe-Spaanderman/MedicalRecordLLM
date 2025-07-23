@@ -100,8 +100,8 @@ class VLLMReportParser:
         base_url: str = "http://localhost:8000/v1/",
         api_key: Optional[str] = "DummyAPIKey",
         prompt_method: str = "ZeroShot",
-        batch_size: int = 32,
-        timeout: int = 30,
+        batch_size: int = 16,
+        timeout: int = 60,
         max_concurrent: int = 6,
         patterns_path: Optional[str] = None,
         save_raw_output: bool = False,
@@ -862,7 +862,10 @@ class VLLMReportParser:
                     return {
                         "patient": item["patient"],
                         "index": item["index"],
-                        "result": None,
+                        "result": {
+                            "reasoning": None,
+                            "extracted_data": None
+                        },
                         "status": "fallback_timeout"
                     }
                 except Exception as e:
@@ -870,7 +873,10 @@ class VLLMReportParser:
                     return {
                         "patient": item["patient"],
                         "index": item["index"],
-                        "result": None,
+                        "result": {
+                            "reasoning": None,
+                            "extracted_data": None
+                        },
                         "status": "fallback_error"
                     }
 
@@ -895,9 +901,11 @@ class VLLMReportParser:
             f"lengths: {[len(item['report']) for item in chunk_inputs]}"
         )
         start_time = time.time()
+
+        batch_timeout = int(self.timeout * self.batch_size / 2)
         
         try:
-            results = await asyncio.wait_for(self.chat_chain.abatch(chunk_inputs), timeout=self.timeout * self.batch_size)
+            results = await asyncio.wait_for(self.chat_chain.abatch(chunk_inputs), timeout=batch_timeout)
             elapsed = time.time() - start_time
             self.logger.info(f"Chunk {chunk_num} completed in {elapsed:.2f}s "
                             f"({len(chunk_inputs)/elapsed:.3f} items/sec)")
@@ -908,11 +916,14 @@ class VLLMReportParser:
                 "status": "success"
             } for input_item, llm_result in zip(chunk_inputs, results)]
         except asyncio.TimeoutError:
-            self.logger.warning(f"Chunk {chunk_num} timed out after {self.timeout * self.batch_size}. Falling back to per-item processing.")
+            self.logger.warning(f"Chunk {chunk_num} timed out after {batch_timeout}. Falling back to per-item processing.")
             return [{
                 "patient": item["patient"],
                 "index": item["index"],
-                "result": None,
+                "result": {
+                    "reasoning": None,
+                    "extracted_data": None
+                },
                 "status": "chunk_timeout",
                 "report": item["report"]
             } for item in chunk_inputs]
@@ -921,7 +932,10 @@ class VLLMReportParser:
             return [{
                 "patient": item["patient"],
                 "index": item["index"],
-                "result": None,
+                "result": {
+                    "reasoning": None,
+                    "extracted_data": None
+                },
                 "status": "chunk_error",
                 "report": item["report"]
             } for item in chunk_inputs]
@@ -1063,4 +1077,8 @@ class VLLMReportParser:
         """
         texts, patients = adapter.prepare_inputs()
         results = self.run_batch(texts, patients)
-        return adapter.format_outputs(results)
+        try:
+            results = adapter.format_outputs(results)
+            return results
+        except:
+            import ipdb; ipdb.set_trace()
