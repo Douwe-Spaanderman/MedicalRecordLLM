@@ -123,11 +123,8 @@ class VLLMReportParser:
             openai_api_key=api_key,
             temperature=params_config.get('temperature', 0.3),
             top_p=params_config.get('top_p', 0.9),
-            #max_tokens=params_config.get('max_tokens', 1024),
-            #max_model_len=params_config.get('max_model_len', 2048),
-            #model_kwargs={
-            #    "repetition_penalty": params_config.get('repetition_penalty', 1.0),
-            #},
+            #frequency_penalty=params_config.get('frequency_penalty', 0.5),
+            #presence_penalty=params_config.get('presence_penalty', 0.0),
         )
         self.self_consistency_sampling = params_config.get('self_consistency_sampling', {"num_samples": 3, "temperature": [0.1, 0.3, 0.5]})
 
@@ -775,7 +772,7 @@ class VLLMReportParser:
         return await asyncio.gather(*[process_one(item) for item in items])
 
     @backoff_except_timeout(max_tries=3)
-    async def _process_chunk(self, chunk_inputs: List[Dict], chunk_num: int, total_chunks: int, timeout: int = 600) -> List[Dict[str, Any]]:
+    async def _process_chunk(self, chunk_inputs: List[Dict], chunk_num: int, total_chunks: int, timeout: int = 900) -> List[Dict[str, Any]]:
         """
         Process a single chunk
         
@@ -914,7 +911,7 @@ class VLLMReportParser:
             
             # Map results back to original index of input
             outputs.sort(key=lambda x: x["index"])
-            results = [r["results"] for r in outputs]
+            results = [r["result"] for r in outputs]
 
             elapsed = time.time() - start_time
             self.logger.info(f"Batch processing completed in {elapsed:.2f} seconds "
