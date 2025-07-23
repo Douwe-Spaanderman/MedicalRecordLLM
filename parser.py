@@ -4,7 +4,7 @@ from typing import Dict, List, Any, Optional, Union, Tuple, Iterable
 import logging
 import asyncio
 import time
-from math import ceil
+import math
 from adapters.base_adapter import BaseAdapter
 from collections import OrderedDict
 from langchain_openai import ChatOpenAI
@@ -100,6 +100,9 @@ class VLLMReportParser:
         base_url: str = "http://localhost:8000/v1/",
         api_key: Optional[str] = "DummyAPIKey",
         prompt_method: str = "ZeroShot",
+        batch_size: int = 32,
+        timeout: int = 60,
+        max_concurrent: int = 6,
         patterns_path: Optional[str] = None,
         save_raw_output: bool = False,
         verbose: bool = False
@@ -113,6 +116,9 @@ class VLLMReportParser:
             base_url: Base URL for vLLM API
             api_key: API key for vLLM (often not required locally)
             prompt_method: Method for generating prompts (e.g., "ZeroShot")
+            batch_size: Batch size for processing reports
+            timeout: Timeout for API requests
+            max_concurrent: Maximum number of concurrent requests to the API
             patterns_path: Path to JSON file with optional extraction patterns
             save_raw_output: Save raw model outputs to data
             verbose: Enable verbose logging for debugging
@@ -128,6 +134,13 @@ class VLLMReportParser:
             #presence_penalty=params_config.get('presence_penalty', 0.0),
         )
         self.self_consistency_sampling = params_config.get('self_consistency_sampling', {"num_samples": 3, "temperature": [0.1, 0.3, 0.5]})
+        self.batch_size = batch_size
+        self.timeout = timeout
+        if prompt_method == "SelfConsistency":
+            # Adjust batch size and timeout for Self-Consistency sampling
+            self.batch_size = self._adjusted_batch_size(batch_size, self.self_consistency_sampling.get("num_samples", 3) + 1)  # +1 for the final aggregation step
+            self.timeout = timeout * (self.self_consistency_sampling.get("num_samples", 3) + 2) # +2 for the final aggregation step + overhead
+        self.max_concurrent = max_concurrent
 
         # Load prompt configuration and method
         self.prompt_config = prompt_config
@@ -206,6 +219,22 @@ class VLLMReportParser:
             
         return None
 
+    def _adjusted_batch_size(batch_size: int, num_samples: int) -> int:
+        """
+        Adjust batch size based on the number of samples in chain.
+        
+        Args:
+            batch_size: Original batch size
+            num_samples: Number of samples for Self-Consistency or PromptChain methods
+        
+        Returns:
+            Adjusted batch size in powers of 2, ensuring it is not less than 1.
+        """
+        base_size = batch_size / num_samples
+        
+        # Calculate the largest power of 2 less than or equal to base_size
+        return int(2 ** math.floor(math.log2(base_size)) if base_size >= 1 else 1)
+    
     def _validate_example(self, example: Dict) -> None:
         """Validate that an example has the correct structure"""
         if not isinstance(example, dict):
@@ -751,14 +780,12 @@ class VLLMReportParser:
 
         return RunnableLambda(generate_candidates) | RunnableLambda(process_with_ensemble)
 
-    @staticmethod
-    def _dynamic_chunks(inputs: List[Dict], batch_size: int = 32, max_tokens: int = 16000) -> Iterable[List[Dict]]:
+    def _dynamic_chunks(self, inputs: List[Dict], max_tokens: int = 16000) -> Iterable[List[Dict]]:
         """
         Dynamic batching that considers both item count and approximate token size
 
         Args:
             inputs: List of input dictionaries to process
-            batch_size: Number of items in a batch
             max_tokens: Maximum token count for the batch (approximate)
             
         Yields:
@@ -770,7 +797,7 @@ class VLLMReportParser:
         for item in inputs:
             # Estimate token count (adjust based on your average token/report ratio)
             approx_tokens = len(item['report']) // 4  # Rough estimate: 1 token ≈ 4 chars
-            item_size = max(1, ceil(approx_tokens / 1000))  # Convert to "size units" (1 = ~1000 tokens)
+            item_size = max(1, math.ceil(approx_tokens / 1000))  # Convert to "size units" (1 = ~1000 tokens)
             
             # Handle single items that exceed max_tokens
             if approx_tokens > max_tokens:
@@ -788,7 +815,7 @@ class VLLMReportParser:
 
             # Start new batch if adding this item would exceed limits
             if (current_batch and 
-                (len(current_batch) >= batch_size or 
+                (len(current_batch) >= self.batch_size or 
                  current_batch_size + item_size > max_tokens // 1000)):
                 yield current_batch
                 current_batch = []
@@ -801,24 +828,22 @@ class VLLMReportParser:
             yield current_batch
 
     @backoff_except_timeout(max_tries=3)
-    async def _fallback_process_items(self, items: List[Dict], max_concurrent: int = 6, timeout: int = 60) -> List[Dict[str, Any]]:
+    async def _fallback_process_items(self, items: List[Dict]) -> List[Dict[str, Any]]:
         """
-        Processes items one by one with short timeout. Returns list of results (None on failure).
+        Processes items one by one. Returns list of results (None on failure).
 
         Args:
             items: List of individual inputs (e.g. from a failed chunk)
-            max_concurrent: Maximum number of concurrent requests to process
-            timeout: Timeout for each individual request
 
         Returns:
             List of results, one per input (or None on failure)
         """
-        semaphore = asyncio.Semaphore(max_concurrent)
+        semaphore = asyncio.Semaphore(self.max_concurrent)
 
         async def process_one(item):
             async with semaphore:
                 try:
-                    result = await asyncio.wait_for(self.chat_chain.abatch([item]), timeout=timeout)
+                    result = await asyncio.wait_for(self.chat_chain.abatch([item]), timeout=self.timeout)
                     return {
                         "patient": item["patient"],
                         "index": item["index"],
@@ -845,7 +870,7 @@ class VLLMReportParser:
         return await asyncio.gather(*[process_one(item) for item in items])
 
     @backoff_except_timeout(max_tries=3)
-    async def _process_chunk(self, chunk_inputs: List[Dict], chunk_num: int, total_chunks: int, timeout: int = 900) -> List[Dict[str, Any]]:
+    async def _process_chunk(self, chunk_inputs: List[Dict], chunk_num: int, total_chunks: int) -> List[Dict[str, Any]]:
         """
         Process a single chunk
         
@@ -865,7 +890,7 @@ class VLLMReportParser:
         start_time = time.time()
         
         try:
-            results = await asyncio.wait_for(self.chat_chain.abatch(chunk_inputs), timeout=timeout)
+            results = await asyncio.wait_for(self.chat_chain.abatch(chunk_inputs), timeout=self.timeout * self.batch_size)
             elapsed = time.time() - start_time
             self.logger.info(f"Chunk {chunk_num} completed in {elapsed:.2f}s "
                             f"({len(chunk_inputs)/elapsed:.3f} items/sec)")
@@ -894,14 +919,12 @@ class VLLMReportParser:
                 "report": item["report"]
             } for item in chunk_inputs]
         
-    async def _abatch_chunked(self, inputs: List[Dict], batch_size: int = 32, max_concurrent: int = 6) -> List[Dict[str, Any]]:
+    async def _abatch_chunked(self, inputs: List[Dict]) -> List[Dict[str, Any]]:
         """
         Optimized async batch processing
 
         Args:
             inputs: List of input dictionaries to process
-            batch_size: Size of each batch for processing
-            max_concurrent: Maximum number of concurrent requests to process
 
         Returns:
             List of processed results from all chunks
@@ -910,12 +933,12 @@ class VLLMReportParser:
             return []
             
         # Create chunks using smart batching
-        chunks = list(self._dynamic_chunks(inputs, batch_size))
+        chunks = list(self._dynamic_chunks(inputs, self.batch_size))
         total_chunks = len(chunks)
         self.logger.info(f"Processing {len(inputs)} items in {total_chunks} optimized chunks")
         
         # Process chunks with concurrency control
-        semaphore = asyncio.Semaphore(max_concurrent)  # Limit concurrent requests
+        semaphore = asyncio.Semaphore(self.max_concurrent)  # Limit concurrent requests
         
         async def process_with_semaphore(chunk, chunk_num):
             async with semaphore:
@@ -946,19 +969,18 @@ class VLLMReportParser:
         # Process fallback items if any
         if fallback_items:
             self.logger.info(f"Processing {len(fallback_items)} items via fallback serially.")
-            fallback_results = await self._fallback_process_items(fallback_items, max_concurrent=max_concurrent)
+            fallback_results = await self._fallback_process_items(fallback_items, max_concurrent=self.max_concurrent)
             results.extend(fallback_results)
 
         return results
     
-    def run_batch(self, reports: List[str], patients: List[str], batch_size: int = 32) -> List[Any]:
+    def run_batch(self, reports: List[str], patients: List[str]) -> List[Any]:
         """
         Run batch processing of reports with async support
 
         Args:
             reports: List of report strings to process
             patients: List of patient identifiers corresponding to each report
-            batch_size: Size of each batch for processing
             
         Returns:
             List of processed results from all reports
@@ -980,7 +1002,7 @@ class VLLMReportParser:
             
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            outputs = loop.run_until_complete(self._abatch_chunked(inputs, batch_size))
+            outputs = loop.run_until_complete(self._abatch_chunked(inputs, self.batch_size))
             
             # Map results back to original index of input
             outputs.sort(key=lambda x: x["index"])
@@ -997,7 +1019,7 @@ class VLLMReportParser:
             loop.close()
 
     # Optional synchronous batch processing alternative
-    def run_batch_sync(self, reports: List[str], patients: List[str], batch_size: int = 32) -> List[Any]:
+    def run_batch_sync(self, reports: List[str], patients: List[str]) -> List[Any]:
         """
         Synchronous version for environments where async isn't possible
         Note: This is less efficient than the async version and not recommended for large datasets
@@ -1005,7 +1027,6 @@ class VLLMReportParser:
         Args:
             reports: List of report strings to process
             patients: List of patient identifiers corresponding to each report
-            batch_size: Size of each batch for processing
 
         Returns:
             List of processed results from all reports
@@ -1015,7 +1036,7 @@ class VLLMReportParser:
             for i, (r, p) in enumerate(zip(reports, patients))
         ]
         outputs = [
-            result for chunk in self._chunks(inputs, batch_size)
+            result for chunk in self._chunks(inputs, self.batch_size)
             for result in self.chat_chain.batch(chunk)
         ]
         results = [None] * len(inputs)
