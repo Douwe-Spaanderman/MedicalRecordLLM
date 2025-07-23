@@ -57,7 +57,7 @@ def main():
         help="Input file format"
     )
     parser.add_argument(
-        "-b", 
+        "-u", 
         "--base-url",
         default="http://localhost:8000/v1",
         type=str,
@@ -95,6 +95,27 @@ def main():
         help="Save raw model output to a file",
     )
     parser.add_argument(
+        "-b",
+        "--batch-size",
+        type=int,
+        default=32,
+        help="Batch size for processing reports (default: 32)"
+    )
+    parser.add_argument(
+        "-t",
+        "--timeout",
+        type=int,
+        default=60,
+        help="Timeout for each request in seconds (default: 60)"
+    )
+    parser.add_argument(
+        "-mc",
+        "--max-concurrent",
+        type=int,
+        default=6,
+        help="Maximum number of concurrent requests (default: 6)"
+    )
+    parser.add_argument(
         "-r",
         "--regex",
         required=False,
@@ -124,6 +145,9 @@ def main():
         base_url=args.base_url,
         api_key=args.api_key,
         prompt_method=args.prompt_method,
+        batch_size=args.batch_size,
+        timeout=args.timeout,
+        max_concurrent=args.max_concurrent,
         patterns_path=args.regex,
         save_raw_output=args.save_raw,
         verbose=args.verbose,
