@@ -5,10 +5,13 @@ import logging
 import asyncio
 import time
 import math
+import numpy as np
+from collections import Counter
 from adapters.base_adapter import BaseAdapter
 from collections import OrderedDict
+from sentence_transformers import util
 from langchain_openai import ChatOpenAI
-from langchain_core.runnables import Runnable, RunnableLambda
+from langchain_core.runnables import Runnable, RunnableLambda, RunnableParallel
 from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, AIMessagePromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import BaseOutputParser
@@ -103,6 +106,72 @@ class ReasoningAndDynamicJSONParser(BaseOutputParser):
             "extracted_data": extracted_data,
         }
 
+class FastEnsemble(Runnable):
+    def __init__(self, embedding_model: str = "all-mpnet-base-v2"):
+        self.logger = logging.getLogger(__name__)
+
+        self.logger.warning(f"Currently using embedding with API endpoints are not supported. Falling back to SentenceTransformer: {embedding_model}.")
+        self.use_embeddings_API = False
+
+        from sentence_transformers import SentenceTransformer
+        self.embedding_model = SentenceTransformer(embedding_model)
+    
+    def _get_embeddings(self, texts: List[str]) -> np.ndarray:
+        if self.use_embeddings_API:
+            embeddings = self.llm(texts)
+        else:
+            embeddings = self.embedding_model.encode(texts, convert_to_numpy=True)
+        return np.array(embeddings)
+
+    def _ensemble_responses(self, candidates: List[Dict]) -> Dict:
+        start_time = time.time()
+        self.logger.info(f"Item ensembling now starting")
+    
+        responses = [c["response"] for c in candidates]
+        
+        final_response = {}
+        for field in responses[0].keys():  # Assuming all have same fields
+            values = [r.get(field) for r in responses]
+            
+            # Try voting first
+            if all(isinstance(v, (str, int, float)) for v in values if v is not None):
+                counter = Counter([v for v in values if v is not None])
+                if counter:
+                    most_common = counter.most_common(1)[0]
+                    if most_common[1] > 1:  # Require at least 2 votes
+                        final_response[field] = most_common[0]
+                        continue
+            
+            # Fallback to embedding similarity
+            valid_values = [(i, str(v)) for i, v in enumerate(values) if v is not None]
+            if not valid_values:
+                final_response[field] = None
+                continue
+                
+            indices, text_values = zip(*valid_values)
+            embeddings = self._get_embeddings(text_values)
+            
+            # Compute similarity matrix and find most central response
+            sim_matrix = util.cos_sim(embeddings, embeddings)
+            centrality_scores = np.sum(sim_matrix.numpy(), axis=1)
+            best_idx = indices[np.argmax(centrality_scores)]
+            final_response[field] = values[best_idx]
+
+        elapsed = time.time() - start_time
+        self.logger.info(f"Item ensembling completed in {elapsed:.2f}s ")
+        
+        return {
+            "reasoning": "Ensembled using voting + embedding similarity",
+            "response": final_response,
+            "candidates": candidates
+        }
+
+    def invoke(self, candidates: List[Dict], config=None) -> Dict:
+        return self._ensemble_responses(candidates)
+
+    def batch(self, inputs: List[List[Dict]], config=None) -> List[Dict]:
+        return [self._ensemble_responses(c) for c in inputs]
+
 class VLLMReportParser:
     def __init__(
         self,
@@ -148,9 +217,13 @@ class VLLMReportParser:
         self.batch_size = batch_size
         self.timeout = timeout
         if prompt_method == "SelfConsistency":
-            # Adjust batch size and timeout for Self-Consistency sampling
-            self.batch_size = self._adjusted_batch_size(batch_size, self.self_consistency_sampling.get("num_samples", 3) + 1)  # +1 for the final aggregation step
-            self.timeout = timeout * (self.self_consistency_sampling.get("num_samples", 3) + 2) # +2 for the final aggregation step + overhead
+            # Adjust batch size and timeout for Self-Consistency sampling.
+            self.batch_size = self._adjusted_batch_size(batch_size, self.self_consistency_sampling.get("num_samples", 3) + 1) # +1 for the final aggregation step + overhead.
+            self.timeout = timeout * (self.self_consistency_sampling.get("num_samples", 3) + 1)
+            self.ensemble_chain = FastEnsemble(
+                embedding_model = params_config.get('embedding_model', 'all-mpnet-base-v2')
+            )
+
         self.max_concurrent = max_concurrent
 
         # Load prompt configuration and method
@@ -237,7 +310,7 @@ class VLLMReportParser:
             
         return None
 
-    def _adjusted_batch_size(batch_size: int, num_samples: int) -> int:
+    def _adjusted_batch_size(self, batch_size: int, num_samples: int) -> int:
         """
         Adjust batch size based on the number of samples in chain.
         
@@ -565,70 +638,6 @@ class VLLMReportParser:
             )
         return system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, prompt_variables, output_format
 
-    def _generate_prompt_self_consistency(self) -> List[str]:
-        """
-        Generate a prompt specifically for Self-Consistency method
-
-        Returns:    
-            Formatted prompt string for Self-Consistency
-        """
-        # Initialize prompt variables for downstream chain construction - necessary for ChatPromptTemplate
-        prompt_variables = {}
-
-        # Build system instructions
-        system_instruction = "\n".join([
-            "You are a medical data extraction system that performs structured reasoning across multiple reasoning paths before producing output. Follow these strict rules:",
-            "1. First, review all candidate outputs and reason step-by-step to identify the most consistent and well-supported values for each field.",
-            "2. After reasoning, output ONLY valid JSON in the exact structure provided.",
-            "3. ALWAYS begin and end the final output with ```json markers — do not include reasoning within these markers.",
-            "4. Use EXACT field names and structure as specified.",
-            "5. If a field is missing from all reasoning paths, use the specified default for that field.",
-            "6. NEVER include commentary, explanations, or deviate from the specified format in the final JSON."
-        ])
-
-        # Build field instructions
-        field_instructions = []
-        output_format = {}
-        for idx, field in enumerate(self.prompt_config['field_instructions'], start=1):
-            field_instruction, output_format = self._format_field_instruction(field, output_format=output_format)
-            field_instructions.append(field_instruction)
-
-        field_instructions = "\n".join(field_instructions)
-
-        # Build task instruction
-        task_instructions = self.prompt_config['task'].strip()
-        task_instructions, task_variable = self._format_json_instructions(task_instructions, "task_variable")
-        
-        # Store task instructions in prompt variables for downstream use
-        prompt_variables['task_variable'] = task_variable
-
-        task_instructions = "\n".join([task_instructions])
-
-        # Construct the prompt
-        report_instructions = "\n".join([
-            "[file name]: {patient}",
-            "{report}",
-        ])
-
-        candidate_instructions = {}
-        num_samples = self.self_consistency_sampling.get('num_samples', 3)
-        # run through num_samples
-        for i in range(num_samples):
-            reasoning_placeholder = f"{{reasoning_{i+1}}}"
-            response_placeholder = f"{{response_{i+1}}}"
-            candidate_instructions[i] = {
-                "reasoning": reasoning_placeholder,
-                "response": response_placeholder
-            }
-
-        final_instructions = (
-            "Begin reconciliation now. First, review all reasoning paths and determine the most consistent, well-supported value "
-            "for each required field, reasoning step-by-step within <think>...</think> tags. Then output ONLY the final structured data "
-            "as a valid JSON block, starting with ```json and ending with ```."
-        )
-
-        return system_instruction, field_instructions, task_instructions, report_instructions, candidate_instructions, final_instructions, prompt_variables, output_format
-
     def _generate_chat_chain(self) -> None:
         """
         Generate the chat chain based on the prompt method and configuration
@@ -702,101 +711,39 @@ class VLLMReportParser:
 
             parser = ReasoningAndDynamicJSONParser(output_format)
             base_chain = prompt_template | self.llm | parser
-
             if self.prompt_method == "SelfConsistency":
-                # For SelfConsistency, we will generate a follow-up prompt
-                system_instruction, field_instructions, task_instructions, report_instructions, candidate_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt_self_consistency()
-                follow_up_prompt_template = ChatPromptTemplate([
-                    SystemMessage(system_instruction, name="system_instructions"),
-                    HumanMessage(field_instructions, name="field_instructions"),
-                    HumanMessagePromptTemplate.from_template(task_instructions, name="task_instructions"),
-                ])
-
-                for key, value in candidate_instructions.items():
-                    follow_up_prompt_template.extend([
-                        AIMessagePromptTemplate.from_template(value['reasoning'], name=f"candidate_{key}_reasoning"),
-                        AIMessagePromptTemplate.from_template(value['response'], name=f"candidate_{key}_response")
-                    ])
-
-                follow_up_prompt_template.extend([
-                    HumanMessagePromptTemplate.from_template(report_instructions, name="report_instructions"),
-                    HumanMessage(final_instructions, name="final_instructions")
-                ])
-                follow_up_prompt_template = follow_up_prompt_template.partial(**prompt_variables)
-                ensemble_chain = follow_up_prompt_template | self.llm | parser
-                self.chat_chain = self._create_self_consistency_chain(base_chain, ensemble_chain)
+                # Initialize our fast ensemble strategy
+                self.chat_chain = self._create_self_consistency_chain(base_chain, parser)
             else:
                 # For other methods, we can use the base chain directly
                 self.chat_chain = base_chain
 
-    def _create_self_consistency_chain(self, base_chain: Runnable, ensemble_chain: Runnable) -> Runnable:
-        """
-        Create a chain for Self-Consistency method that generates candidates and processes them with an ensemble model
-
-        Args:
-            base_chain: Base chain for generating candidates
-            ensemble_chain: Chain for processing candidates with an ensemble model
-
-        Returns:
-            Runnable chain for Self-Consistency processing
-        """
-        async def generate_candidates(input_batch: List[Dict]) -> List[Dict]:
-            """
-            Generate multiple candidates for each input using different temperatures
-
-            Args:
-                input_batch: List of input dictionaries to process
-            Returns:
-                List of dictionaries with candidates for each input
-            """
-            candidates_batch = []
-            num_samples = self.self_consistency_sampling.get("num_samples", 3)
-            temperatures = self.self_consistency_sampling.get("temperature", [0.1, 0.3, 0.5])
-            for i in range(num_samples):
-                logging.info(f"Generating candidate {i+1}/{num_samples} with temperature {temperatures[i % len(temperatures)]}")
-                temp = temperatures[i % len(temperatures)]
-                llm_with_temp = base_chain.with_config({"temperature": temp})
-                results = await llm_with_temp.abatch(input_batch)
-
-                if i == 0:
-                    candidates_batch = [{"candidates": [], "original_input": item} for item in input_batch]
-
-                for idx, result in enumerate(results):
-                    candidates_batch[idx]["candidates"].append({
-                        "reasoning": result.get("reasoning", ""),
-                        "response": result.get("parsed_output", {})
-                    })
-            
-            return candidates_batch
+    def _create_self_consistency_chain(self, base_chain: Runnable, parser: ReasoningAndDynamicJSONParser) -> Runnable:
+        num_samples = self.self_consistency_sampling.get("num_samples", 3)
+        temperatures = self.self_consistency_sampling.get("temperature", [0.1, 0.3, 0.5])
         
-        async def process_with_ensemble(candidates_batch: List[Dict]) -> List[Dict]:
-            """
-            Process the generated candidates using an ensemble model
-
-            Args:
-                candidates_batch: List of dictionaries with candidates for each input
-            Returns:
-                List of dictionaries with final ensemble outputs
-            """
-            ensemble_inputs = []
-            for item in candidates_batch:
-                candidate_instructions = {
-                    str(i): {
-                        "reasoning": candidate["reasoning"],
-                        "response": json.dumps(candidate["response"])
-                    }
-                    for i, candidate in enumerate(item["candidates"])
+        return (
+            # Generate all candidates in parallel with different temperatures
+            RunnableParallel(**{
+                f"candidate_{i}": base_chain.with_config(
+                    run_name=f"candidate_{i}",
+                    tags=[f"temp={temperatures[i]}"],
+                    config={"temperature": temperatures[i]}
+                )
+                for i in range(num_samples)
+            })
+            # Prepare ensemble input while preserving raw candidates 
+            | RunnableLambda(lambda x: [
+                {
+                    "temperature": temperatures[i],
+                    "reasoning": x[f"candidate_{i}"].get("reasoning", ""),
+                    "response": x[f"candidate_{i}"].get("extracted_data", {})
                 }
-                ensemble_input = {
-                    **item["original_input"],
-                    "candidate_instructions": candidate_instructions
-                }
-                ensemble_inputs.append(ensemble_input)
-            
-            self.logger.info(f"Processing {len(ensemble_inputs)} candidate batches with ensemble model")
-            return await ensemble_chain.abatch(ensemble_inputs)
-
-        return RunnableLambda(generate_candidates) | RunnableLambda(process_with_ensemble)
+                for i in range(num_samples)
+            ])
+            # Get ensemble result
+            | self.ensemble_chain
+        )
 
     def _dynamic_chunks(self, inputs: List[Dict], max_tokens: int = 16000) -> Iterable[List[Dict]]:
         """
