@@ -72,6 +72,17 @@ class ReasoningAndDynamicJSONParser(BaseOutputParser):
         # Fallback to any { ... } block
         if not json_blocks:
             fallback_blocks = re.findall(r'(?P<json>{.*?})', text, re.DOTALL)
+            # Fallback to remove weird characters in { ... } block
+            if not fallback_blocks:
+                json_candidate = re.search(r'{[\s\S]*}', text)
+                if json_candidate:
+                    json_text = json_candidate.group()
+                    # remove lines with comments or malformed entries
+                    lines = json_text.splitlines()
+                    clean_lines = [line for line in lines if ':' in line and '–' not in line and '"' in line]
+                    # Join and wrap in braces
+                    fallback_blocks = '{' + '\n'.join(clean_lines) + '}'
+
             json_blocks = fallback_blocks
 
         extracted_data = None
