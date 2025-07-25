@@ -1,7 +1,8 @@
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union, List
+import textwrap
 
 # --- Custom Style Parameters ---
 palette = ['#66c2a5','#fc8d62','#8da0cb', '#e78ac3']
@@ -10,6 +11,7 @@ fontsize = 18
 subfontsize = 16
 tickfontsize = 14
 edgecolor = "black"
+errorbar_color = "black"
 style = "ticks"
 barwidth = 0.8
 
@@ -22,83 +24,163 @@ custom_params = {
 }
 sns.set_theme(style=style, rc=custom_params, palette=sns.color_palette(palette))
 
-def plot_metric_summary(input_file: str, output_file: Optional[str] = None, weights: Dict[str, float] = None, figsize: Tuple[int]=(15, 5)) -> None:
+def plot_barplot(
+    data: pd.DataFrame,
+    x: str,
+    y: str,
+    hue: Optional[str] = None,
+    ylabel: str = "",
+    xlabel: str = "",
+    wraptext: bool = True,
+    ci_lower: Optional[str] = None,
+    ci_upper: Optional[str] = None,
+    ax: Optional[plt.Axes] = None,
+    legend: bool = False
+) -> plt.Axes:
     """
-    Plots a 3-panel summary:
-    - ax0: Macro-average (with optional weights)
-    - ax1: Accuracy per field
-    - ax2: Similarity per field
-    """
-    # Load results from the input file
-    results = pd.read_csv(input_file)
+    Create a barplot with specified parameters.
 
+    Args:
+    - data: DataFrame containing the data to plot
+    - x: Column name for x-axis
+    - y: Column name for y-axis
+    - hue: Column name for hue (optional)
+    - ylabel: Label for y-axis
+    - xlabel: Label for x-axis
+    - wraptext: Whether to wrap text in x-axis labels (default True)
+    - ax: Matplotlib Axes object to plot on (optional)
+    - legend: Whether to show legend (default False)
+    Returns:
+    - ax: Matplotlib Axes object with the plot
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 5))
+
+    if wraptext:
+        data[x] = data[x].apply(lambda x: '\n'.join(textwrap.wrap(str(x), width=15)))
+
+    sns.barplot(x=x, y=y, hue=hue, data=data, ax=ax, width=barwidth)
+    if ci_lower and ci_upper:
+        if hue:
+            x_levels = data[x].unique()
+            hue_levels = data[hue].unique()
+            n_hue = len(hue_levels)
+            for i, row in data.iterrows():
+                x_idx = list(x_levels).index(row[x])
+                hue_idx = list(hue_levels).index(row[hue])
+                total_barwidth = barwidth / n_hue
+                x_val = x_idx - barwidth / 2 + total_barwidth * (hue_idx + 0.5)
+                yval = row[y]
+                yerr = [[yval - row[ci_lower]], [row[ci_upper] - yval]]
+                ax.errorbar(x=x_val, y=yval, yerr=yerr, fmt='none', ecolor=errorbar_color, capsize=4)
+        else:
+            for i, row in data.iterrows():
+                yval = row[y]
+                yerr = [[yval - row[ci_lower]], [row[ci_upper] - yval]]
+                ax.errorbar(x=i, y=yval, yerr=yerr, fmt='none', ecolor=errorbar_color, capsize=4)
+                
+    ax.set_ylabel(ylabel, fontsize=subfontsize, labelpad=10)
+    ax.set_xlabel(xlabel)
+    ax.set_ylim(0, 1)
+    ax.tick_params(axis='x', labelrotation=45, labelsize=tickfontsize)
+    ax.tick_params(axis='y', labelsize=tickfontsize)
+    ax.set_title("", fontsize=subfontsize)
+    if not legend:
+        ax.legend().set_visible(False)
+    
+    return ax
+
+def plot_metric_summary(
+    input_data: Union[pd.DataFrame, List[pd.DataFrame], Dict[str, pd.DataFrame]], 
+    output_file: Optional[str] = None, 
+    weights: Dict[str, float] = None, 
+    figsize: Tuple[int] = (15, 5),
+    data_labels: Optional[List[str]] = None
+) -> None:
+    """
+    Plot metric summary for single or multiple DataFrames.
+    
+    Args:
+    - input_data: Can be a single DataFrame, a list of DataFrames, or a dictionary of DataFrames
+    - output_file: Path to save the figure (optional)
+    - weights: Dictionary of weights for fields (optional)
+    - figsize: Figure size
+    - data_labels: Labels for each DataFrame (used when input_data is a list/dict)
+    """
+    # Convert input to consistent format (list of DataFrames with labels)
+    if isinstance(input_data, pd.DataFrame):
+        dfs = [input_data]
+        if data_labels is None:
+            data_labels = ["Data 1"]
+    elif isinstance(input_data, dict):
+        dfs = list(input_data.values())
+        if data_labels is None:
+            data_labels = list(input_data.keys())
+    else:  # list
+        dfs = input_data
+        if data_labels is None:
+            data_labels = [f"Data {i+1}" for i in range(len(dfs))]
+    
+    # Process each DataFrame and add a source label
+    processed_dfs = []
+    for df, label in zip(dfs, data_labels):
+        df = df.copy()
+        df['source'] = label
+        processed_dfs.append(df)
+    
+    # Combine all DataFrames
+    combined_results = pd.concat(processed_dfs)
+    
     # Separate metric types
-    acc_df = results[results["metric_type"] == "accuracy"]
-    sim_df = results[results["metric_type"].str.contains("similarity")]
-    num_acc = len(acc_df)
-    num_sim = len(sim_df)
-
-    # Macro-average (combined accuracy + similarity)
-    if weights:
-        results["weight"] = results["field"].map(weights).fillna(1)
-        macro_avg = (results["mean"] * results["weight"]).sum() / results["weight"].sum()
-    else:
-        macro_avg = results["mean"].mean()
+    avg_df = combined_results[combined_results["metric_type"] == "macro_avgs"]
+    acc_df = combined_results[combined_results["metric_type"] == "accuracy"]
+    sim_df = combined_results[combined_results["metric_type"].str.contains("similarity")]
+    num_avg = len(avg_df["field"].unique())
+    num_acc = len(acc_df["field"].unique())
+    num_sim = len(sim_df["field"].unique())
 
     # --- Dynamic subplot width allocation ---
-    macro_rel = 1
+    num_avg = max(num_avg, 1)
     acc_rel = max(num_acc, 1)
     sim_rel = max(num_sim, 1)
-    total_rel = macro_rel + acc_rel + sim_rel
-
-    widths = [macro_rel / total_rel, acc_rel / total_rel, sim_rel / total_rel]
+    total_rel = num_avg + acc_rel + sim_rel
+    widths = [num_avg / total_rel, acc_rel / total_rel, sim_rel / total_rel]
     
-    fig = plt.figure(figsize=(16, 8), constrained_layout=True)
-    gs = fig.add_gridspec(1, 3, width_ratios=widths, wspace=0.1)
+    fig = plt.figure(figsize=figsize, constrained_layout=True)
+    # Increase margins by adjusting subplot parameters
+    plt.subplots_adjust(left=0.1, right=0.9, top=0.9, bottom=0.2)
+    gs = fig.add_gridspec(1, 3, width_ratios=widths, wspace=0.15)  # Increased wspace
 
     # --- ax0: Macro-average ---
     ax0 = fig.add_subplot(gs[0])
-    sns.barplot(x=[""], y=[macro_avg], ax=ax0, width=barwidth)
-    ax0.set_ylabel("Macro-Average Score", fontsize=subfontsize, labelpad=10)
-    ax0.set_xlabel("")
-    ax0.set_ylim(0, 1)
-    ax0.tick_params(labelsize=tickfontsize)
-    ax0.set_xticks([])
-    ax0.set_title("", fontsize=subfontsize)
+    plot_barplot(data=avg_df, x="field", y="mean", hue="source", ylabel="Macro-Average Score", ci_lower="ci_low", ci_upper="ci_high", ax=ax0, wraptext=True, legend=False)
 
     # --- ax1: Accuracy ---
     ax1 = fig.add_subplot(gs[1], sharey=ax0)
-    if num_acc > 0:
-        sns.barplot(x="field", y="mean", data=acc_df, ax=ax1, width=barwidth)
-        ax1.set_ylabel("Accuracy / Precentile (%)", fontsize=subfontsize)
-        ax1.set_xlabel("")
-        ax1.set_ylim(0, 1)
-        ax1.tick_params(axis='x', labelrotation=45, labelsize=tickfontsize)
-        ax1.tick_params(axis='y', labelsize=tickfontsize)
-        ax1.set_title("", fontsize=subfontsize)
-    else:
-        ax1.axis("off")
+    plot_barplot(data=acc_df, x="field", y="mean", hue="source", ylabel="Accuracy", ci_lower="ci_low", ci_upper="ci_high", ax=ax1, wraptext=True, legend=False)
 
     # --- ax2: Similarity ---
     ax2 = fig.add_subplot(gs[2], sharey=ax0)
-    if num_sim > 0:
-        sns.barplot(x="field", y="mean", data=sim_df, ax=ax2, width=barwidth)
-        ax2.set_ylabel("Mean Semantic Similarity", fontsize=subfontsize)
-        ax2.set_xlabel("")
-        ax2.set_ylim(0, 1)
-        ax2.tick_params(axis='x', labelrotation=45, labelsize=tickfontsize)
-        ax2.tick_params(axis='y', labelsize=tickfontsize)
-        ax2.set_title("", fontsize=subfontsize)
-    else:
-        ax2.axis("off")
+    plot_barplot(data=sim_df, x="field", y="mean", hue="source", ylabel="Semantic Similarity", ci_lower="ci_low", ci_upper="ci_high", ax=ax2, wraptext=True, legend=False)
 
-    # Fix overlap
+    # Improved legend in the middle
+    handles, labels = ax1.get_legend_handles_labels()
+    legend = ax1.legend(
+        handles, 
+        labels, 
+        loc='upper center',
+        bbox_to_anchor=(0.5, 1.15),  # Position above the plots
+        frameon=False,  # Remove border
+        ncol=len(data_labels) if data_labels else 1,
+    )
+
+    # Fix overlap and adjust layout
     for ax in [ax0, ax1, ax2]:
         for label in ax.get_xticklabels():
             label.set_horizontalalignment('right')
 
     if output_file:
-        plt.savefig(output_file)
+        plt.savefig(output_file, bbox_inches='tight', pad_inches=0.5)  # Increased padding
     else:
         plt.show()
 
@@ -107,10 +189,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize calculated performance results from LLM output against ground truth.")
     parser.add_argument(
         "-i",
-        "--input-file",
+        "--input-files",
         required=True,
-        type=str, 
-        help="Path to the LLM output file"
+        nargs='+',
+        help="Path(s) to the LLM output file(s)"
     )
     parser.add_argument(
         "-o",
@@ -119,6 +201,35 @@ if __name__ == "__main__":
         default=None,
         help="Path to save the results output visualization."
     )
-
+    parser.add_argument(
+        "-l",
+        "--data-labels",
+        nargs='+',
+        default=None,
+        help="Optional labels for each input file (must match number of input files)"
+    )
     args = parser.parse_args()
-    plot_metric_summary(args.input_file, args.output_file)
+
+    # Load input data
+    input_data = []
+    for file in args.input_files:
+        df = pd.read_csv(file)
+        input_data.append(df)
+
+    # If labels are provided, validate them
+    if args.data_labels:
+        if len(args.data_labels) != len(input_data):
+            raise ValueError("Number of labels must match number of input files")
+        # Convert to dictionary with labels as keys
+        input_data = {label: df for label, df in zip(args.data_labels, input_data)}
+    else:
+        # If single file, keep as DataFrame; if multiple, keep as list
+        if len(input_data) == 1:
+            input_data = input_data[0]
+
+    # Call the plotting function
+    plot_metric_summary(
+        input_data=input_data,
+        output_file=args.output_file,
+        data_labels=args.data_labels if args.data_labels else None
+    )

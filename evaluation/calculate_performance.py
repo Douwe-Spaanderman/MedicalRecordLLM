@@ -1,7 +1,9 @@
 import pandas as pd
+import numpy as np
 from typing import Dict, Any, Union, Optional, List
 import ast
 import yaml
+from scipy.stats import t
 from sentence_transformers import SentenceTransformer, util
 
 def safe_literal_eval(val: Union[str, None]) -> Union[None, List[Any]]:
@@ -44,8 +46,10 @@ def calculate_similarity(pred: str, gt: str, sentence_model: SentenceTransformer
     """
     if pred == gt:
         return 1.0 # Complete match
+    if not gt:
+        return np.nan
     if not pred or not gt:
-        return 0.0  # complete mismatch
+        return 0.0
     
     embeddings = sentence_model.encode([pred, gt], convert_to_tensor=True)
     similarity = util.cos_sim(embeddings[0], embeddings[1]).item()
@@ -82,6 +86,17 @@ def calculate_list_similarity(pred_list: List[str], gt_list: List[str], sentence
     return sum(scores) / len(scores)
 
 def calculate_results(prediction: pd.DataFrame, ground_truth: pd.DataFrame, prompt_config: Dict[str, Any], sentence_model: SentenceTransformer) -> pd.DataFrame:
+    """
+    Calculate performance metrics comparing prediction against ground truth.
+    
+    Args:
+        prediction (pd.DataFrame): DataFrame containing predicted values.
+        ground_truth (pd.DataFrame): DataFrame containing ground truth values.
+        prompt_config (Dict[str, Any]): Configuration dictionary defining fields and their types.
+        sentence_model (SentenceTransformer): Pretrained sentence transformer model for semantic similarity.
+    Returns:
+        pd.DataFrame: DataFrame containing calculated metrics for each field.
+    """
     # Sanity check if prediction and ground_truth have the same columns and length
     if not prediction.columns.equals(ground_truth.columns):
         raise ValueError("Prediction and ground truth DataFrames must have the same columns.")
@@ -121,16 +136,92 @@ def calculate_results(prediction: pd.DataFrame, ground_truth: pd.DataFrame, prom
         else:
             raise ValueError(f"Unsupported field type for field '{field}': {meta.get('type')}")
         
+        # Calculate 95% confidence interval
+        n = len(scores)
+        mean_score = scores.mean()
+        std_err = scores.std(ddof=1) / np.sqrt(n)
+        ci = t.interval(0.95, df=n-1, loc=mean_score, scale=std_err)
+        
         results.append({
             "field": field,
             "metric_type": metric_type,
             "mean": scores.mean(),
-            "std": scores.std()
+            "ci_low": ci[0],
+            "ci_high": ci[1],
         })
 
     return pd.DataFrame(results)
 
-def process_results(LLM_output: Union[pd.DataFrame, str], prompt_config: Union[Dict[str, Any], str], ground_truth: Optional[Union[pd.DataFrame, str]] = None, sentence_model: str = "all-mpnet-base-v2", output_file: Optional[str] = None) -> None:
+def calculate_macro_average(results: pd.DataFrame, prompt_config: Dict[str, Any], weights: Optional[List[int]] = None) -> pd.DataFrame:
+    """
+    Calculate macro-average of all metrics in the results DataFrame.
+
+    Args:
+        results (pd.DataFrame): DataFrame containing calculated metrics for each field.
+        prompt_config (Dict[str, Any]): Configuration dictionary defining fields and their types.
+        weights (Optional[List[int]]): Weights for each field used for macro averaging. This overrides the weights defined in the prompt config.
+    Returns:
+        pd.DataFrame: DataFrame with macro averages.
+    """
+    result_fields = list(results["field"])
+    num_fields = len(result_fields)
+
+    # Handle weights override
+    if weights is not None:
+        if len(weights) != num_fields:
+            raise ValueError(f"Length of weights ({len(weights)}) does not match number of result fields ({num_fields}).")
+        weight_mapping = {field: weight for field, weight in zip(result_fields, weights)}
+        print("Using overridden weights:")
+        for field in result_fields:
+            print(f"  {field}: {weight_mapping[field]}")
+    else:
+        # Attempt to collect weights from prompt_config
+        weight_mapping = {}
+        missing_weight_fields = []
+
+        for field in result_fields:
+            config = prompt_config.get(field)
+            if config and "weight" in config:
+                weight_mapping[field] = config["weight"]
+            else:
+                missing_weight_fields.append(field)
+
+        if len(missing_weight_fields) == 0:
+            print("Using weights from prompt_config:")
+            for field in result_fields:
+                print(f"  {field}: {weight_mapping[field]}")
+        elif len(missing_weight_fields) == num_fields:
+            weight_mapping = None
+        else:
+            raise ValueError(
+                f"Incomplete weight definitions in prompt_config. "
+                f"The following fields are missing weights: {missing_weight_fields}"
+            )
+
+    means = results["mean"].to_numpy()
+    if weight_mapping:
+        results["weight"] = results["field"].map(weight_mapping).fillna(1)
+        weights_arr = results["weight"].to_numpy()
+        macro_avg = np.average(means, weights=weights_arr)
+
+        std_err = np.sqrt(np.average((means - macro_avg) ** 2, weights=weights_arr)) / np.sqrt(len(means))
+    else:
+        macro_avg = np.mean(means)
+        std_err = np.std(means, ddof=1) / np.sqrt(len(means))
+
+    n = len(means)
+    ci = t.interval(0.95, df=n - 1, loc=macro_avg, scale=std_err)
+    macro_results = {
+        "field": "All Fields",
+        "metric_type": "macro_avgs",
+        "mean": macro_avg,
+        "ci_low": ci[0],
+        "ci_high": ci[1],
+    }
+    return pd.concat([results, pd.DataFrame([macro_results])], ignore_index=True)
+
+    
+def process_results(LLM_output: Union[pd.DataFrame, str], prompt_config: Union[Dict[str, Any], str], ground_truth: Optional[Union[pd.DataFrame, str]] = None, sentence_model: str = "all-mpnet-base-v2", scoring_weights: Optional[List[int]] = None, output_file: Optional[str] = None) -> None:
     """
     Process LLM output and compare it against ground truth.
 
@@ -139,6 +230,7 @@ def process_results(LLM_output: Union[pd.DataFrame, str], prompt_config: Union[D
         prompt_config (Union[Dict[str, Any], str]): Prompt configuration as a dictionary or path to a YAML file.
         ground_truth (Optional[Union[pd.DataFrame, str]]): Ground truth data as a DataFrame or path to a CSV file.
         sentence_model (str): Sentence transformer model to use for semantic mapping.
+        scoring_weights (Optional[List[int]]): Weights for each field used for macro averaging. This overrides the weights defined in the prompt config.
         output_file (Optional[str]): Path to save the results output file.
     """
     if isinstance(LLM_output, str):
@@ -186,6 +278,9 @@ def process_results(LLM_output: Union[pd.DataFrame, str], prompt_config: Union[D
     # Calculate results
     results = calculate_results(prediction, ground_truth, prompt_config, sentence_model)
 
+    # Calculate macro (weighted) average of all metrics
+    results = calculate_macro_average(results, prompt_config, scoring_weights)
+
     # If output file is specified, save the results
     if output_file:
         results.to_csv(output_file, index=False)
@@ -232,6 +327,14 @@ if __name__ == "__main__":
         default=None,
         help="Path to save the results output file."
     )
+    parser.add_argument(
+        "-w",
+        "--weights",
+        nargs='+',
+        type=int,
+        default=None,
+        help="Weights for each field used for macro averaging. This overrides the weights defined in the prompt config."
+    )
 
     args = parser.parse_args()
-    process_results(args.LLM_output, args.prompt_config, args.ground_truth, args.sentence_model, args.output_file)
+    process_results(args.LLM_output, args.prompt_config, args.ground_truth, args.sentence_model, args.weights, args.output_file)
