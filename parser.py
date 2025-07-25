@@ -65,7 +65,7 @@ class ReasoningAndDynamicJSONParser(BaseOutputParser):
                     lines = json_text.splitlines()
                     clean_lines = [line for line in lines if ':' in line and '–' not in line and '"' in line]
                     # Join and wrap in braces
-                    fallback_blocks = '{' + '\n'.join(clean_lines) + '}'
+                    fallback_blocks = ['{' + '\n'.join(clean_lines) + '}']
 
             json_blocks = fallback_blocks
 
@@ -161,6 +161,7 @@ class VLLMReportParser:
         batch_size: Optional[int] = None,
         timeout: int = 60,
         max_concurrent: int = 32,
+        select_example: Optional[str] = None,
         patterns_path: Optional[str] = None,
         save_raw_output: bool = False,
         verbose: bool = False
@@ -177,6 +178,7 @@ class VLLMReportParser:
             batch_size: Batch size for processing reports. If None, internal batching not used.
             timeout: Timeout for API requests
             max_concurrent: Maximum number of concurrent requests to the API
+            select_example: 1-based index of the example to use (only for example-based prompt methods).
             patterns_path: Path to JSON file with optional extraction patterns
             save_raw_output: Save raw model outputs to data
             verbose: Enable verbose logging for debugging
@@ -208,6 +210,7 @@ class VLLMReportParser:
             )
 
         self.max_concurrent = max_concurrent
+        self.select_example = select_example
 
         # Load prompt configuration and method
         self.prompt_config = prompt_config
@@ -227,6 +230,8 @@ class VLLMReportParser:
         self.logger.info("Initializing VLLMReportParser with the following configuration:")
         self.logger.info(f"Model: {params_config.get('model')}")
         self.logger.info(f"Prompt Method: {self.prompt_method}")
+        if self.select_example:
+            self.logger.info(f"Selecting example: {self.select_example} at index: {self.select_example-1}")
         self.logger.info(f"Batch Size: {self.batch_size}")
         self.logger.info(f"Timeout: {self.timeout} seconds")
         self.logger.info(f"Max Concurrent Requests: {self.max_concurrent}")
@@ -519,11 +524,14 @@ class VLLMReportParser:
         prompt_variables = {}
         # Build system instructions. Either use the config or default to a generic instruction
         if 'system_instruction' in self.prompt_config:
-            self.logger.warning("System instruction found in config file. This is not recommended for production use.")
+            self.logger.warning(
+                    "Deprecation warning: passing system instruction in config file has been deprecated and will be unsupported in future versions. "
+                    "Now using it to overwrite hardcoded system instructions, which is not advised. "
+            )
             system_instructions = self.prompt_config['system_instruction'].strip()
         else:
             self.logger.debug("System instruction not found in config file. Using default system instruction, which is recommended")
-            if self.prompt_method in ["ZeroShot", "OneShot"]:
+            if self.prompt_method in ["ZeroShot", "OneShot", "FewShot"]:
                 system_instructions = [
                     "You are a medical data extraction system that ONLY outputs valid JSON. Maintain strict compliance with these rules:",
                     "1. ALWAYS begin and end your response with ```json markers",
@@ -573,34 +581,68 @@ class VLLMReportParser:
 
         # Add examples section
         if self.prompt_method != 'ZeroShot':
-            example_instructions = {}
-            if 'example' not in self.prompt_config:
+            examples_instructions = []
+            if 'example' in self.prompt_config:
+                self.logger.warning(
+                    "Deprecation warning: passing a single example is deprecated and will be unsupported in future versions. "
+                    "Please reformat the yaml file with (`examples: `) instead."
+                )
+                examples = [self.prompt_config["example"]]
+            elif 'examples' not in self.prompt_config:
                 raise ValueError("Examples are required for prompt methods other than ZeroShot")
-            
-            example = self.prompt_config["example"]
-            self._validate_example(example)
-            example_instructions["user"] = "\n".join([example['input'].strip()])
-
-            if self.prompt_method in ["CoT", "SelfConsistency", "PromptChain"]:
-                if 'reasoning' not in example:
-                    raise ValueError("Examples for CoT, SelfConsistency, and PromptChain must include 'reasoning'")
-                
-                reasoning_instructions = example['reasoning'].strip()
-                if self.prompt_method == "PromptChain":
-                    reasoning_instructions = reasoning_instructions.split("\n")
-                    example_instructions["assistant_reasoning"] = "\n".join([reasoning_instructions[i] for i in chain_indexes if i < len(reasoning_instructions)])
-
-            example_outcome = example['output'].strip()
-            if self.prompt_method == "PromptChain":
-                example_outcome, example_output_variable = self._format_promptchain_instructions(example_outcome, chain_indexes, "example_output_variable")
             else:
-                example_outcome, example_output_variable = self._format_json_instructions(example_outcome, "example_output_variable")
+                examples = self.prompt_config["examples"]
 
-            example_instructions["assistant_output"] = "\n".join([example_outcome])
-            # Store example output variable in prompt variables for downstream use
-            prompt_variables["example_output_variable"] = example_output_variable
+            if self.select_example:
+                if self.prompt_method == "FewShot":
+                    raise ValueError("Prompt method should not be FewShot if select example was provided")
+                
+                if self.select_example > len(examples):
+                    self.logger.warning(
+                        f"Select example: {self.select_example} was out of range for number of examples in yaml file: {len(examples)}. "
+                        "Switching to taking first example. "
+                    )
+                    self.select_example = 1
+                else:
+                    self.logger.info(
+                        f"Selecting example {self.select_example} out of {len(examples)} examples, since OneShot was provided for prompting method"
+                    )
+                examples = [examples[self.select_example-1]]
+            else:
+                if self.prompt_method == "OneShot":
+                    self.logger.warning(
+                        f"Prompt method is OneShot, however no value was provided for select example. "
+                        "Switching to taking first example. "
+                    )
+                    examples = [examples[0]]
+
+            for idx, example in enumerate(examples):
+                self._validate_example(example)
+                example_instructions = {}
+                example_instructions[f"user"] = "\n".join([example['input'].strip()])
+
+                if self.prompt_method in ["CoT", "SelfConsistency", "PromptChain"]:
+                    if 'reasoning' not in example:
+                        raise ValueError("Examples for CoT, SelfConsistency, and PromptChain must include 'reasoning'")
+                    
+                    reasoning_instructions = example['reasoning'].strip()
+                    if self.prompt_method == "PromptChain":
+                        reasoning_instructions = reasoning_instructions.split("\n")
+                        example_instructions[f"assistant_reasoning"] = "\n".join([reasoning_instructions[i] for i in chain_indexes if i < len(reasoning_instructions)])
+
+                example_outcome = example['output'].strip()
+                if self.prompt_method == "PromptChain":
+                    example_outcome, example_output_variable = self._format_promptchain_instructions(example_outcome, chain_indexes, f"example_output_variable_{idx}")
+                else:
+                    example_outcome, example_output_variable = self._format_json_instructions(example_outcome, f"example_output_variable_{idx}")
+
+                example_instructions[f"assistant_output"] = "\n".join([example_outcome])
+                # Store example output variable in prompt variables for downstream use
+                prompt_variables[f"example_output_variable_{idx}"] = example_output_variable
+
+                examples_instructions.append(example_instructions)
         else:
-            example_instructions = None
+            examples_instructions = None
 
         # Add the actual report content
         report_instructions = "\n".join([
@@ -608,7 +650,7 @@ class VLLMReportParser:
             "{report}",
         ])
 
-        if self.prompt_method in ["ZeroShot", "OneShot"]:
+        if self.prompt_method in ["ZeroShot", "OneShot", "FewShot"]:
             final_instructions = (
                 "Begin the extraction now. Your response must contain only a single valid JSON block, "
                 "enclosed in triple backticks and prefixed with `json`, like this: ```json ... ```"
@@ -619,7 +661,7 @@ class VLLMReportParser:
                 "enclosed within <think>...</think> tags. Then, output only the final structured data as a single valid JSON block, "
                 "starting with ```json and ending with ```."
             )
-        return system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, prompt_variables, output_format
+        return system_instructions, field_instructions, task_instructions, examples_instructions, report_instructions, final_instructions, prompt_variables, output_format
 
     def _generate_chat_chain(self) -> None:
         """
@@ -636,24 +678,29 @@ class VLLMReportParser:
             # Generate prompts for each chain
             prompt_templates = []
             for chain in self.chains:
-                system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt(chain=chain)
+                system_instructions, field_instructions, task_instructions, examples_instructions, report_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt(chain=chain)
                 prompt = [
                     SystemMessage(system_instructions, name="system_instructions"),
                     HumanMessage(field_instructions, name="field_instructions"),
                     HumanMessage(task_instructions, name="task_instructions"),
                 ]
 
-                if example_instructions:
-                    prompt.extend([
-                        HumanMessage(example_instructions["user"], name="example_user"),
-                    ])
-                    if "assistant_reasoning" in example_instructions:
+                if examples_instructions:
+                    has_reasoning = any("assistant_reasoning" in ex for ex in examples_instructions)
+                    prompt.append(
+                        HumanMessage(f"Below are {len(examples_instructions)} examples of expected input{', reasoning,' if has_reasoning else ''} and output. followed by a new task.", name="example_intro")
+                    )
+                    for idx, example_instructions in enumerate(examples_instructions):
                         prompt.extend([
-                            AIMessage(example_instructions["assistant_reasoning"], name="example_assistant_reasoning"),
+                            HumanMessage(example_instructions["user"], name=f"example_user_{idx}"),
                         ])
-                    prompt.extend([
-                        AIMessage(example_instructions["assistant_output"], name="example_assistant_output")
-                    ])
+                        if "assistant_reasoning" in example_instructions:
+                            prompt.extend([
+                                AIMessage(example_instructions["assistant_reasoning"], name=f"example_assistant_reasoning_{idx}"),
+                            ])
+                        prompt.extend([
+                            AIMessagePromptTemplate.from_template(example_instructions["assistant_output"], name=f"example_assistant_output_{idx}")
+                        ])
 
                 prompt.extend([
                     HumanMessage(report_instructions, name="report_instructions"),
@@ -666,24 +713,29 @@ class VLLMReportParser:
             
             # TODO: Implement chain processing for PromptChain method with memory
         else:
-            system_instructions, field_instructions, task_instructions, example_instructions, report_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt(chain=None)
+            system_instructions, field_instructions, task_instructions, examples_instructions, report_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt(chain=None)
             prompt = [
                 SystemMessage(system_instructions),
                 HumanMessage(field_instructions, name="field_instructions"),
                 HumanMessagePromptTemplate.from_template(task_instructions, name="task_instructions"),
             ]
 
-            if example_instructions:
-                prompt.extend([
-                    HumanMessage(example_instructions["user"], name="example_user"),
-                ])
-                if "assistant_reasoning" in example_instructions:
+            if examples_instructions:
+                has_reasoning = any("assistant_reasoning" in ex for ex in examples_instructions)
+                prompt.append(
+                    HumanMessage(f"Below are {len(examples_instructions)} examples of expected input{', reasoning,' if has_reasoning else ''} and output. followed by a new task.", name="example_intro")
+                )
+                for idx, example_instructions in enumerate(examples_instructions):
                     prompt.extend([
-                        AIMessage(example_instructions["assistant_reasoning"], name="example_assistant_reasoning"),
+                        HumanMessage(example_instructions["user"], name=f"example_user_{idx}"),
                     ])
-                prompt.extend([
-                    AIMessagePromptTemplate.from_template(example_instructions["assistant_output"], name="example_assistant_output")
-                ])
+                    if "assistant_reasoning" in example_instructions:
+                        prompt.extend([
+                            AIMessage(example_instructions["assistant_reasoning"], name=f"example_assistant_reasoning_{idx}"),
+                        ])
+                    prompt.extend([
+                        AIMessagePromptTemplate.from_template(example_instructions["assistant_output"], name=f"example_assistant_output_{idx}")
+                    ])
 
             prompt.extend([
                 HumanMessagePromptTemplate.from_template(report_instructions, name="report_instructions"),

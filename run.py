@@ -31,7 +31,7 @@ def main():
         "-pm",
         "--prompt-method",
         required=True,
-        choices=["ZeroShot", "OneShot", "CoT", "SelfConsistency", "PromptChain"],
+        choices=["ZeroShot", "OneShot", "FewShot", "CoT", "SelfConsistency", "PromptChain"],
         type=str,
         help="prompting method"
     )
@@ -116,6 +116,13 @@ def main():
         help="Maximum number of concurrent requests (default: 32)"
     )
     parser.add_argument(
+        "-se",
+        "--select_example",
+        type=int,
+        default=None,
+        help="1-based index of the example to use (only for example-based prompt methods) (default: None)"
+    )
+    parser.add_argument(
         "-r",
         "--regex",
         required=False,
@@ -148,6 +155,7 @@ def main():
         batch_size=args.batch_size,
         timeout=args.timeout,
         max_concurrent=args.max_concurrent,
+        select_example=args.select_example,
         patterns_path=args.regex,
         save_raw_output=args.save_raw,
         verbose=args.verbose,
