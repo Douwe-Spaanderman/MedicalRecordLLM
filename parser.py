@@ -105,7 +105,9 @@ class FastEnsemble(Runnable):
         return np.array(embeddings)
 
     def _ensemble_responses(self, candidates: List[Dict]) -> Dict:
-        responses = [c["response"] for c in candidates]
+        responses = [c["extracted_data"] for c in candidates]
+
+        start_time = time.time()
         
         final_response = {}
         for field in responses[0].keys():  # Assuming all have same fields
@@ -140,7 +142,7 @@ class FastEnsemble(Runnable):
         
         return {
             "reasoning": "Ensembled using voting + embedding similarity",
-            "response": final_response,
+            "extracted_data": final_response,
             "candidates": candidates
         }
 
@@ -202,9 +204,6 @@ class VLLMReportParser:
         self.batch_size = batch_size
         self.timeout = timeout
         if prompt_method == "SelfConsistency":
-            # Adjust batch size and timeout for Self-Consistency sampling.
-            self.batch_size = self._adjusted_batch_size(batch_size, self.self_consistency_sampling.get("num_samples", 3) + 1) # +1 for the final aggregation step + overhead.
-            self.timeout = timeout * (self.self_consistency_sampling.get("num_samples", 3) + 1)
             self.ensemble_chain = FastEnsemble(
                 embedding_model = params_config.get('embedding_model', 'all-mpnet-base-v2')
             )
@@ -297,7 +296,8 @@ class VLLMReportParser:
             self.logger.warning(f"JSON extraction failed: {e}")
             
         return None
-
+    
+    # deprecated and not currently used
     def _adjusted_batch_size(self, batch_size: int, num_samples: int) -> int:
         """
         Adjust batch size based on the number of samples in chain.
@@ -772,7 +772,7 @@ class VLLMReportParser:
                 {
                     "temperature": temperatures[i],
                     "reasoning": x[f"candidate_{i}"].get("reasoning", ""),
-                    "response": x[f"candidate_{i}"].get("extracted_data", {})
+                    "extracted_data": x[f"candidate_{i}"].get("extracted_data", {})
                 }
                 for i in range(num_samples)
             ])
