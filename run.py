@@ -98,22 +98,22 @@ def main():
         "-b",
         "--batch-size",
         type=int,
-        default=16,
-        help="Batch size for processing reports (default: 16)"
+        default=None,
+        help="Optional internal batch size for processing reports (default: None)"
     )
     parser.add_argument(
         "-t",
         "--timeout",
         type=int,
         default=60,
-        help="Timeout for each request in seconds (default: 30)"
+        help="Timeout for each request in seconds (default: 60)"
     )
     parser.add_argument(
         "-mc",
         "--max-concurrent",
         type=int,
-        default=6,
-        help="Maximum number of concurrent requests (default: 6)"
+        default=32,
+        help="Maximum number of concurrent requests (default: 32)"
     )
     parser.add_argument(
         "-r",

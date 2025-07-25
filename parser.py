@@ -15,32 +15,13 @@ from langchain_core.runnables import Runnable, RunnableLambda, RunnableParallel
 from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, AIMessagePromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import BaseOutputParser
+from langchain_core.callbacks.base import BaseCallbackHandler
+from langchain_core.outputs import LLMResult
 from pydantic import create_model, Field
 from functools import wraps
 import backoff
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-def backoff_except_timeout(max_tries: int = 3):
-    """
-    Decorator to apply exponential backoff on exceptions, excluding asyncio.TimeoutError.
-    This is useful for retrying operations that may fail due to transient issues,
-    """
-    def decorator(func):
-        @backoff.on_exception(
-            backoff.expo,
-            Exception,
-            max_tries=max_tries,
-            jitter=backoff.full_jitter,
-        )
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            try:
-                return await func(*args, **kwargs)
-            except asyncio.TimeoutError:
-                raise
-        return wrapper
-    return decorator
 
 class ReasoningAndDynamicJSONParser(BaseOutputParser):
     def __init__(self, output_format: Dict[str, Any]):
@@ -98,7 +79,7 @@ class ReasoningAndDynamicJSONParser(BaseOutputParser):
                 continue
 
         if extracted_data is None:
-            self._logger.error("Failed to parse JSON block or no valid JSON found. Returning all data as reasoning.")
+            self._logger.error("Failed to parse JSON block or no valid JSON found.")
             reasoning = text.strip()
 
         return {
@@ -124,9 +105,6 @@ class FastEnsemble(Runnable):
         return np.array(embeddings)
 
     def _ensemble_responses(self, candidates: List[Dict]) -> Dict:
-        start_time = time.time()
-        self.logger.info(f"Item ensembling now starting")
-    
         responses = [c["response"] for c in candidates]
         
         final_response = {}
@@ -180,9 +158,9 @@ class VLLMReportParser:
         base_url: str = "http://localhost:8000/v1/",
         api_key: Optional[str] = "DummyAPIKey",
         prompt_method: str = "ZeroShot",
-        batch_size: int = 16,
+        batch_size: Optional[int] = None,
         timeout: int = 60,
-        max_concurrent: int = 6,
+        max_concurrent: int = 32,
         patterns_path: Optional[str] = None,
         save_raw_output: bool = False,
         verbose: bool = False
@@ -196,7 +174,7 @@ class VLLMReportParser:
             base_url: Base URL for vLLM API
             api_key: API key for vLLM (often not required locally)
             prompt_method: Method for generating prompts (e.g., "ZeroShot")
-            batch_size: Batch size for processing reports
+            batch_size: Batch size for processing reports. If None, internal batching not used.
             timeout: Timeout for API requests
             max_concurrent: Maximum number of concurrent requests to the API
             patterns_path: Path to JSON file with optional extraction patterns
@@ -210,8 +188,13 @@ class VLLMReportParser:
             openai_api_key=api_key,
             temperature=params_config.get('temperature', 0.3),
             top_p=params_config.get('top_p', 0.9),
-            #frequency_penalty=params_config.get('frequency_penalty', 0.5),
-            #presence_penalty=params_config.get('presence_penalty', 0.0),
+            max_tokens=params_config.get('max_tokens', 2048),
+            frequency_penalty=params_config.get('frequency_penalty', 0.0),
+            presence_penalty=params_config.get('presence_penalty', 0.0),
+            #model_kwargs={
+            #    'top_k': params_config.get('top_k', 50),
+            #    'repetition_penalty' : params_config.get('repetition_penalty', 1.2),
+            #}
         )
         self.self_consistency_sampling = params_config.get('self_consistency_sampling', {"num_samples": 3, "temperature": [0.1, 0.3, 0.5]})
         self.batch_size = batch_size
@@ -792,8 +775,7 @@ class VLLMReportParser:
         if current_batch:
             yield current_batch
 
-    @backoff_except_timeout(max_tries=3)
-    async def _fallback_process_items(self, items: List[Dict]) -> List[Dict[str, Any]]:
+    async def _process_items(self, items: List[Dict]) -> List[Dict[str, Any]]:
         """
         Processes items one by one. Returns list of results (None on failure).
 
@@ -805,42 +787,57 @@ class VLLMReportParser:
         """
         semaphore = asyncio.Semaphore(self.max_concurrent)
 
-        async def process_one(item):
+        @backoff.on_exception(backoff.expo, Exception, max_tries=3, jitter=backoff.full_jitter)
+        async def process(item):
             async with semaphore:
                 try:
-                    result = await asyncio.wait_for(self.chat_chain.abatch([item]), timeout=self.timeout)
+                    self.logger.debug(f"Now processing patient: {item['patient']}")
+                    result = await asyncio.wait_for(self.chat_chain.ainvoke(item), timeout=self.timeout)
+                    if result.get('extracted_data', None) == None:
+                        raise ValueError("Failed to parse JSON block or no valid JSON found. Returning all data as reasoning.")
+
                     return {
                         "patient": item["patient"],
                         "index": item["index"],
-                        "result": result[0],
+                        "result": result,
                         "status": "success"
                     }
                 except asyncio.TimeoutError:
-                    self.logger.warning(f"[Fallback] Timeout for Patient: {item.get('patient')}, Index: {item.get('index')}")
-                    return {
-                        "patient": item["patient"],
-                        "index": item["index"],
-                        "result": {
-                            "reasoning": None,
-                            "extracted_data": None
-                        },
-                        "status": "fallback_timeout"
-                    }
+                    self.logger.warning(f"Timeout for Patient: {item.get('patient')}, Index: {item.get('index')}")
+                    raise
                 except Exception as e:
-                    self.logger.error(f"[Fallback] Failed — Patient: {item.get('patient')}, Index: {item.get('index')}, Error: {e}")
-                    return {
-                        "patient": item["patient"],
-                        "index": item["index"],
-                        "result": {
-                            "reasoning": None,
-                            "extracted_data": None
-                        },
-                        "status": "fallback_error"
-                    }
+                    self.logger.error(f"Failed — Patient: {item.get('patient')}, Index: {item.get('index')}, Error: {e}")
+                    raise
 
-        return await asyncio.gather(*[process_one(item) for item in items])
+        # Wrapper to catch final failure after retries:
+        async def safe_process(item):
+            try:
+                return await process(item)
+            except asyncio.TimeoutError:
+                # After max retries, return timeout status instead of propagating
+                return {
+                    "patient": item["patient"],
+                    "index": item["index"],
+                    "result": {
+                        "reasoning": None,
+                        "extracted_data": None
+                    },
+                    "status": "timeout"
+                }
+            except Exception:
+                # After max retries, return error status instead of propagating
+                return {
+                    "patient": item["patient"],
+                    "index": item["index"],
+                    "result": {
+                        "reasoning": None,
+                        "extracted_data": None
+                    },
+                    "status": "error"
+                }
 
-    @backoff_except_timeout(max_tries=3)
+        return await asyncio.gather(*[safe_process(item) for item in items])
+
     async def _process_chunk(self, chunk_inputs: List[Dict], chunk_num: int, total_chunks: int) -> List[Dict[str, Any]]:
         """
         Process a single chunk
@@ -862,41 +859,57 @@ class VLLMReportParser:
 
         batch_timeout = int(self.timeout * self.batch_size / 2)
         
-        try:
-            results = await asyncio.wait_for(self.chat_chain.abatch(chunk_inputs), timeout=batch_timeout)
-            elapsed = time.time() - start_time
-            self.logger.info(f"Chunk {chunk_num} completed in {elapsed:.2f}s "
-                            f"({len(chunk_inputs)/elapsed:.3f} items/sec)")
-            return [{
-                "patient": input_item["patient"],
-                "index": input_item["index"],
-                "result": llm_result,
-                "status": "success"
-            } for input_item, llm_result in zip(chunk_inputs, results)]
-        except asyncio.TimeoutError:
-            self.logger.warning(f"Chunk {chunk_num} timed out after {batch_timeout}. Falling back to per-item processing.")
-            return [{
-                "patient": item["patient"],
-                "index": item["index"],
-                "result": {
-                    "reasoning": None,
-                    "extracted_data": None
-                },
-                "status": "chunk_timeout",
-                "report": item["report"]
-            } for item in chunk_inputs]
-        except Exception as e:
-            self.logger.error(f"Error processing chunk {chunk_num}: {str(e)}")
-            return [{
-                "patient": item["patient"],
-                "index": item["index"],
-                "result": {
-                    "reasoning": None,
-                    "extracted_data": None
-                },
-                "status": "chunk_error",
-                "report": item["report"]
-            } for item in chunk_inputs]
+        @backoff.on_exception(backoff.expo, Exception, max_tries=3, jitter=backoff.full_jitter)
+        async def process_chunk_inner():
+            try:
+                results = await asyncio.wait_for(self.chat_chain.abatch(chunk_inputs), timeout=batch_timeout)
+                elapsed = time.time() - start_time
+                self.logger.info(f"Chunk {chunk_num} completed in {elapsed:.2f}s "
+                                f"({len(chunk_inputs)/elapsed:.3f} items/sec)")
+                # Here if valid JSON is passed by status succes, and if failed downstream individually analyzed
+                return [{
+                    "patient": input_item["patient"],
+                    "index": input_item["index"],
+                    "result": llm_result,
+                    "status": "success" if llm_result.get('extracted_data') is not None else "failed",
+                    "report": input_item["report"]
+                } for input_item, llm_result in zip(chunk_inputs, results)]
+            except asyncio.TimeoutError:
+                self.logger.warning(f"Chunk {chunk_num} timed out after {batch_timeout}. Falling back to per-item processing.")
+                raise 
+            except Exception as e:
+                self.logger.error(f"Error processing chunk {chunk_num}: {str(e)}")
+                raise  # propagate to retry
+        
+        async def safe_process_chunk():
+            try:
+                return await process_chunk_inner()
+            except asyncio.TimeoutError:
+                # Final fallback on timeout after retries
+                return [{
+                    "patient": item["patient"],
+                    "index": item["index"],
+                    "result": {
+                        "reasoning": None,
+                        "extracted_data": None
+                    },
+                    "status": "chunk_timeout",
+                    "report": item["report"]
+                } for item in chunk_inputs]
+            except Exception as e:
+                # Final fallback on other errors after retries
+                return [{
+                    "patient": item["patient"],
+                    "index": item["index"],
+                    "result": {
+                        "reasoning": None,
+                        "extracted_data": None
+                    },
+                    "status": "chunk_error",
+                    "report": item["report"]
+                } for item in chunk_inputs]
+
+        return await safe_process_chunk()
         
     async def _abatch_chunked(self, inputs: List[Dict]) -> List[Dict[str, Any]]:
         """
@@ -931,7 +944,7 @@ class VLLMReportParser:
             chunk_results = await future
 
             # Check if any items need fallback processing
-            needs_fallback = [r for r in chunk_results if r["status"] in ["chunk_timeout", "chunk_error"]]
+            needs_fallback = [r for r in chunk_results if r["status"] in ["chunk_timeout", "chunk_error", "failed"]]
 
             if needs_fallback:
                 fallback_items.extend([{
@@ -948,7 +961,7 @@ class VLLMReportParser:
         # Process fallback items if any
         if fallback_items:
             self.logger.info(f"Processing {len(fallback_items)} items via fallback serially.")
-            fallback_results = await self._fallback_process_items(fallback_items)
+            fallback_results = await self._process_items(fallback_items)
             results.extend(fallback_results)
 
         return results
@@ -1000,7 +1013,7 @@ class VLLMReportParser:
     # Optional synchronous batch processing alternative
     def run_batch_sync(self, reports: List[str], patients: List[str]) -> List[Any]:
         """
-        Synchronous version for environments where async isn't possible
+        Synchronous version for running batches in environments where async isn't possible
         Note: This is less efficient than the async version and not recommended for large datasets
         
         Args:
@@ -1018,10 +1031,55 @@ class VLLMReportParser:
             result for chunk in self._dynamic_chunks(inputs)
             for result in self.chat_chain.batch(chunk)
         ]
-        results = [None] * len(inputs)
-        for inp, result in zip(inputs, outputs):
-            results[inp["index"]] = result
-        return results
+        return [r["result"] for r in outputs]
+
+    # Optional individual item processing alternative
+    async def run_patient_async(self, reports: List[str], patients: List[str]) -> List[Any]:
+        """
+        Asynchronous version for running individual samples environments
+        Note: This is less efficient than the batch version, but sometimes recommended
+        with computation constrains.
+        
+        Args:
+            reports: List of report strings to process
+            patients: List of patient identifiers corresponding to each report
+
+        Returns:
+            List of processed results from all reports
+        """
+        inputs = [
+            {"report": r, "patient": p, "index": i}
+            for i, (r, p) in enumerate(zip(reports, patients))
+        ]
+
+        results = await self._process_items(inputs)
+
+        # Ensure results are ordered by original input order
+        results_sorted = sorted(results, key=lambda x: x["index"])
+
+        return [r["result"] for r in results_sorted]
+
+    # Optional synchronous individual item processing alternative
+    def run_patient_sync(self, reports: List[str], patients: List[str]) -> List[Any]:
+        """
+        Synchronous version for running individual samples environments where async isn't possible
+        Note: This is less efficient than the async version and not recommended for large datasets
+        
+        Args:
+            reports: List of report strings to process
+            patients: List of patient identifiers corresponding to each report
+
+        Returns:
+            List of processed results from all reports
+        """
+        inputs = [
+            {"report": r, "patient": p, "index": i}
+            for i, (r, p) in enumerate(zip(reports, patients))
+        ]
+        outputs = [
+            self.chat_chain.invoke(patient) for patient in inputs
+        ]
+        return [r["result"] for r in outputs]
 
     def process_with_adapter(self, adapter: BaseAdapter) -> Any:
         """
@@ -1034,9 +1092,15 @@ class VLLMReportParser:
             Processed results in adapter's output format
         """
         texts, patients = adapter.prepare_inputs()
-        results = self.run_batch(texts, patients)
-        try:
-            results = adapter.format_outputs(results)
-            return results
-        except:
-            import ipdb; ipdb.set_trace()
+        start_time = time.time()
+
+        if not self.batch_size:
+            results = asyncio.run(self.run_patient_async(texts, patients))
+        else:
+            results = self.run_batch(texts, patients)
+
+        elapsed = time.time() - start_time
+        self.logger.info(f"Complete workflow took {elapsed:.2f} seconds")
+
+        results = adapter.format_outputs(results)
+        return results
