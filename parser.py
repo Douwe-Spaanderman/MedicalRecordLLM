@@ -1,11 +1,13 @@
 import json
 import re
-from typing import Dict, List, Any, Optional, Union, Tuple, Iterable
+from typing import TypedDict, Dict, List, Any, Optional, Union, Tuple, Iterable
 import logging
 import asyncio
 import time
 import math
+import uuid
 import numpy as np
+from tqdm.asyncio import tqdm_asyncio
 from collections import Counter
 from adapters.base_adapter import BaseAdapter
 from collections import OrderedDict
@@ -13,7 +15,7 @@ from sentence_transformers import util
 from langchain_openai import ChatOpenAI
 from langchain_core.runnables import Runnable, RunnableLambda, RunnableParallel
 from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, AIMessagePromptTemplate
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
 from langchain_core.output_parsers import BaseOutputParser
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
@@ -83,6 +85,7 @@ class ReasoningAndDynamicJSONParser(BaseOutputParser):
             reasoning = text.strip()
 
         return {
+            "raw_output": text,
             "reasoning": reasoning,
             "extracted_data": extracted_data,
         }
@@ -214,7 +217,7 @@ class VLLMReportParser:
         # Load prompt configuration and method
         self.prompt_config = prompt_config
         self.prompt_method = prompt_method
-        self.chains = self._detect_chains()
+        self.chains = self._detect_chains() if prompt_method == "PromptChain" else None
 
         # Additional configurations
         self.patterns = self._load_patterns(patterns_path) if patterns_path else None
@@ -222,9 +225,16 @@ class VLLMReportParser:
         self.verbose = verbose
         self.logger = logging.getLogger(__name__)
         if self.verbose:
-            import langchain
-            langchain.verbose = True
+            from langchain_core.globals import set_verbose
+            set_verbose(True)
             self.logger.setLevel(logging.DEBUG)
+
+        if prompt_method == "PromptChain" and self.batch_size:
+            self.logger.warning(
+                f"Internal batch size was set to {self.batch_size}, but this is incompatible with the 'PromptChain' method. "
+                "Falling back to individual patient prompting instead."
+            )
+            self.batch_size = None
 
         self.logger.info("Initializing VLLMReportParser with the following configuration:")
         self.logger.info(f"Model: {params_config.get('model')}")
@@ -234,6 +244,8 @@ class VLLMReportParser:
         self.logger.info(f"Batch Size: {self.batch_size}")
         self.logger.info(f"Timeout: {self.timeout} seconds")
         self.logger.info(f"Max Concurrent Requests: {self.max_concurrent}")
+        if self.chains:
+            self.logger.info(f"Using the following chain sequence: {self.chains}")
 
         # Generate the chat chains based on the prompt method
         self._generate_chat_chain()
@@ -369,7 +381,7 @@ class VLLMReportParser:
         """
         # Skip field instruction not in chain if chain is specified
         if chain is not None and field.get('chain_order') != chain:
-            return None
+            return None, output_format
 
         instruction = [f'{index}. "{field["name"]}":']
         output_format[field['name']] = {}
@@ -677,6 +689,7 @@ class VLLMReportParser:
             
             # Generate prompts for each chain
             prompt_templates = []
+            parsers = []
             for chain in self.chains:
                 system_instructions, field_instructions, task_instructions, examples_instructions, report_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt(chain=chain)
                 prompt = [
@@ -703,15 +716,16 @@ class VLLMReportParser:
                         ])
 
                 prompt.extend([
-                    HumanMessage(report_instructions, name="report_instructions"),
+                    HumanMessagePromptTemplate.from_template(report_instructions, name="report_instructions"),
                     HumanMessage(final_instructions, name="final_instructions")
                 ])
                 prompt_template = ChatPromptTemplate(prompt)
                 prompt_template = prompt_template.partial(**prompt_variables)
 
                 prompt_templates.append(prompt_template)
+                parsers.append(ReasoningAndDynamicJSONParser(output_format))
             
-            # TODO: Implement chain processing for PromptChain method with memory
+            self.chat_chain = self._create_prompt_chain_graph(prompt_templates, parsers)
         else:
             system_instructions, field_instructions, task_instructions, examples_instructions, report_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt(chain=None)
             prompt = [
@@ -748,12 +762,88 @@ class VLLMReportParser:
             base_chain = prompt_template | self.llm | parser
             if self.prompt_method == "SelfConsistency":
                 # Initialize our fast ensemble strategy
-                self.chat_chain = self._create_self_consistency_chain(base_chain, parser)
+                self.chat_chain = self._create_self_consistency_chain(base_chain)
             else:
                 # For other methods, we can use the base chain directly
                 self.chat_chain = base_chain
 
-    def _create_self_consistency_chain(self, base_chain: Runnable, parser: ReasoningAndDynamicJSONParser) -> Runnable:
+    def _create_prompt_chain_graph(self, prompt_templates: List[ChatPromptTemplate], parsers: List[ReasoningAndDynamicJSONParser]) -> Runnable:
+        """
+        Create a LangGraph with memory from the prompt templates
+        for prompt chaining
+        
+        Args:
+            prompt_templates: List of ChatPromptTemplate objects
+            
+        Returns:
+            Runnable graph with memory
+        """
+        # Import langgraph here so optional dependency only required when using graphs
+        from langgraph.graph import MessagesState, StateGraph, START, END
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        class PromptChainState(TypedDict):
+            report: str
+            patient: str
+            index: int
+            result: Dict[str, Any]
+            messages: List[BaseMessage]
+            status: str
+
+        # Initialize the graph and memory
+        workflow = StateGraph(state_schema=PromptChainState)
+        memory = InMemorySaver()
+
+        for idx, (prompt_template, parser) in enumerate(zip(prompt_templates, parsers)):
+            node_name = f"chain_{idx}"
+            def create_node(prompt_template: ChatPromptTemplate, parser: ReasoningAndDynamicJSONParser, chain_idx: int):
+                @backoff.on_exception(backoff.expo, Exception, max_tries=3, jitter=backoff.full_jitter)
+                async def node(state: PromptChainState) -> Dict[str, Any]:
+                    try:
+                        chain = prompt_template | self.llm | parser
+                        result = await chain.ainvoke({"report": state["report"], "patient": state["patient"]}, timeout=self.timeout)
+
+                        if result.get('extracted_data', None) == None:
+                            raise ValueError(f"Failed to parse JSON block or no valid JSON found for Chain {chain_idx}.")
+
+                        return {
+                            "patient": state.get("patient"),
+                            "index": state.get("index"),
+                            "result": {
+                                "reasoning": state.get("result", {}).get("reasoning", []) + [result["reasoning"]],
+                                "extracted_data": {**state.get("result", {}).get("extracted_data", {}), **result["extracted_data"]}
+                            },
+                            "messages": state.get("messages", []) + [AIMessage(content=result.get("raw_output"))],
+                            "status": "succes"
+                        }
+                    except asyncio.TimeoutError:
+                        self.logger.warning(f"Timeout for Patient: {state.get('patient')}, Index: {state.get('index')}, Chain Index: {chain_idx}")
+                        raise
+                    except Exception as e:
+                        self.logger.error(f"Failed — Patient: {state.get('patient')}, Index: {state.get('index')}, Chain Index: {chain_idx}, Error: {e}")
+                        raise
+
+                return node
+
+            workflow.add_node(node_name, create_node(prompt_template=prompt_template, parser=parser, chain_idx=idx))
+            
+            if idx == 0:
+                workflow.add_edge(START, node_name)
+            elif idx > 0:
+                workflow.add_edge(f"chain_{idx-1}", node_name)
+
+        workflow.add_edge(f"chain_{len(prompt_templates)-1}", END)
+
+        graph = workflow.compile(checkpointer=memory)
+
+        if self.verbose:
+            from IPython.display import Image
+            with open("graph_output.png", "wb") as f:
+                f.write(graph.get_graph().draw_mermaid_png())
+
+        return graph
+
+    def _create_self_consistency_chain(self, base_chain: Runnable) -> Runnable:
         num_samples = self.self_consistency_sampling.get("num_samples", 3)
         temperatures = self.self_consistency_sampling.get("temperature", [0.1, 0.3, 0.5])
         
@@ -844,7 +934,14 @@ class VLLMReportParser:
             async with semaphore:
                 try:
                     self.logger.debug(f"Now processing patient: {item['patient']}")
-                    result = await asyncio.wait_for(self.chat_chain.ainvoke(item), timeout=self.timeout)
+                    if self.prompt_method == "PromptChain":
+                        thread_id = uuid.uuid4()
+                        config = {"configurable": {"thread_id": thread_id}}
+                        result = await asyncio.wait_for(self.chat_chain.ainvoke(item, config={"configurable": {"thread_id": thread_id}}), timeout=self.timeout)
+                        result = result["result"]
+                    else:
+                        result = await asyncio.wait_for(self.chat_chain.ainvoke(item), timeout=self.timeout)
+
                     if result.get('extracted_data', None) == None:
                         raise ValueError("Failed to parse JSON block or no valid JSON found. Returning all data as reasoning.")
 
@@ -888,7 +985,7 @@ class VLLMReportParser:
                     "status": "error"
                 }
 
-        return await asyncio.gather(*[safe_process(item) for item in items])
+        return await tqdm_asyncio.gather(*[safe_process(item) for item in items])
 
     async def _process_chunk(self, chunk_inputs: List[Dict], chunk_num: int, total_chunks: int) -> List[Dict[str, Any]]:
         """
