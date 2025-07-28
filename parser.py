@@ -17,9 +17,11 @@ from langchain_core.runnables import Runnable, RunnableLambda, RunnableParallel
 from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, AIMessagePromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
 from langchain_core.output_parsers import BaseOutputParser
+from langchain_core.callbacks.base import BaseCallbackHandler
+from langchain_core.outputs import LLMResult
 from pydantic import create_model, Field
+from functools import wraps
 import backoff
-from montoring import AsyncLLMMonitor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -244,15 +246,6 @@ class VLLMReportParser:
         self.logger.info(f"Max Concurrent Requests: {self.max_concurrent}")
         if self.chains:
             self.logger.info(f"Using the following chain sequence: {self.chains}")
-
-        # Set up the monitor for async LLM monitoring
-        self.monitor = AsyncLLMMonitor(
-            base_url=base_url,
-            api_key=api_key,
-            update_interval=1,
-            max_history=3600,
-            verbose=verbose
-        )
 
         # Generate the chat chains based on the prompt method
         self._generate_chat_chain()
@@ -1136,7 +1129,6 @@ class VLLMReportParser:
         start_time = time.time()
         self.logger.info(f"Starting batch processing of {len(reports)} items")
         
-        self.monitor.start_monitoring()
         try:
             if len(reports) != len(patients):
                 raise ValueError("Reports and patients lists must be of equal length")
@@ -1165,7 +1157,6 @@ class VLLMReportParser:
             self.logger.error(f"Batch processing failed: {str(e)}")
             raise
         finally:
-            self.monitor.stop_monitoring()
             loop.close()
 
     # Optional synchronous batch processing alternative
@@ -1234,14 +1225,9 @@ class VLLMReportParser:
             {"report": r, "patient": p, "index": i}
             for i, (r, p) in enumerate(zip(reports, patients))
         ]
-        self.monitor.start_monitoring()
-        try:
-            outputs = [
-                self.chat_chain.invoke(patient) for patient in inputs
-            ]
-        finally:
-            self.monitor.stop_monitoring()
-            
+        outputs = [
+            self.chat_chain.invoke(patient) for patient in inputs
+        ]
         return [r["result"] for r in outputs]
 
     def process_with_adapter(self, adapter: BaseAdapter) -> Any:
