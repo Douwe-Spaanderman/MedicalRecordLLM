@@ -165,5 +165,4 @@ venv/*
 *__pycache__*
 
 experiment/*
-experiments/*
 setup.sh
