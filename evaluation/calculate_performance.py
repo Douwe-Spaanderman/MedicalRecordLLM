@@ -65,25 +65,30 @@ def calculate_list_similarity(pred_list: List[str], gt_list: List[str], sentence
     Returns:
         float: Average maximum similarity score for ground truth items against predictions.
     """
-    if not gt_list:
-        return 1.0 if not pred_list else 0.0  # Handle empty GT case
-
     pred_list = [str(p) for p in pred_list or []]
     gt_list = [str(g) for g in gt_list or []]
 
-    # Compute similarity of each ground truth item to the full prediction list
-    scores = []
-    for gt_item in gt_list:
-        if not pred_list:
-            scores.append(0.0)
-        else:
+    if not gt_list and not pred_list:
+        return 1.0  # Both are empty = perfect match
+    if not gt_list or not pred_list:
+        return 0.0  # One is empty, the other isn't = total mismatch
+    
+    def directional_score(source_list, target_list):
+        scores = []
+        for source_item in source_list:
             similarities = [
-                calculate_similarity(pred_item, gt_item, sentence_model)
-                for pred_item in pred_list
+                calculate_similarity(source_item, target_item, sentence_model)
+                for target_item in target_list
             ]
-            scores.append(max(similarities))
+            scores.append(max(similarities) if similarities else 0.0)
+        return sum(scores) / len(scores) if scores else 0.0
 
-    return sum(scores) / len(scores)
+    # GT -> Pred and Pred -> GT
+    gt_to_pred = directional_score(gt_list, pred_list)
+    pred_to_gt = directional_score(pred_list, gt_list)
+
+    return (gt_to_pred + pred_to_gt) / 2
+
 
 def calculate_results(prediction: pd.DataFrame, ground_truth: pd.DataFrame, prompt_config: Dict[str, Any], sentence_model: SentenceTransformer) -> pd.DataFrame:
     """
@@ -108,7 +113,7 @@ def calculate_results(prediction: pd.DataFrame, ground_truth: pd.DataFrame, prom
     results = []
     for field, meta in prompt_config.items():
         # Calculate metrics depending on the field type
-        if meta.get("type") == "string":
+        if meta.get("type") in ["string", "number", "binary", "boolean", "categorical", "number_or_missing", "binary_of_missing" "boolean_or_missing"]:
             if "options" in meta:
                 # Calculate the mean accuracy and standard deviation for categorical fields
                 scores = (prediction[field] == ground_truth[field]).astype(int)
@@ -120,7 +125,7 @@ def calculate_results(prediction: pd.DataFrame, ground_truth: pd.DataFrame, prom
                     for p, g in zip(prediction[field], ground_truth[field])
                 ])
                 metric_type = "semantic_similarity"
-        elif meta.get("type") == "list":
+        elif meta.get("type") in ["list", 'list_of_missing']:
             # Ensure both prediction and ground truth are lists
             prediction[field] = prediction[field].apply(lambda x: x if isinstance(x, list) else [])
             ground_truth[field] = ground_truth[field].apply(
@@ -131,7 +136,7 @@ def calculate_results(prediction: pd.DataFrame, ground_truth: pd.DataFrame, prom
                 for p, g in zip(prediction[field], ground_truth[field])
             ])
             metric_type = "list_similarity"
-        elif meta.get("type") == "dict":
+        elif meta.get("type") in ["dictionary", "dict", "dictionary_or_missing", "dict_of_missing"]:
             raise NotImplementedError("Dictionary type fields are not supported yet.")
         else:
             raise ValueError(f"Unsupported field type for field '{field}': {meta.get('type')}")

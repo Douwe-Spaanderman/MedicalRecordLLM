@@ -163,14 +163,14 @@ def plot_metric_summary(
     ax2 = fig.add_subplot(gs[2], sharey=ax0)
     plot_barplot(data=sim_df, x="field", y="mean", hue="source", ylabel="Semantic Similarity", ci_lower="ci_low", ci_upper="ci_high", ax=ax2, wraptext=True, legend=False)
 
-    # Improved legend in the middle
+    # Shared legend for all axes, placed above the entire figure
     handles, labels = ax1.get_legend_handles_labels()
-    legend = ax1.legend(
-        handles, 
-        labels, 
+    fig.legend(
+        handles,
+        labels,
         loc='upper center',
-        bbox_to_anchor=(0.5, 1.15),  # Position above the plots
-        frameon=False,  # Remove border
+        bbox_to_anchor=(0.5, 1.10),  # Adjust as needed
+        frameon=False,
         ncol=len(data_labels) if data_labels else 1,
     )
 
