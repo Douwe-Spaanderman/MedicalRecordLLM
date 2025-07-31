@@ -180,7 +180,7 @@ def plot_metric_summary(
             label.set_horizontalalignment('right')
 
     if output_file:
-        plt.savefig(output_file, bbox_inches='tight', pad_inches=0.5)  # Increased padding
+        plt.savefig(output_file, bbox_inches='tight', pad_inches=0.5, dpi=300)  # Increased padding
     else:
         plt.show()
 

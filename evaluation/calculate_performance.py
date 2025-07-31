@@ -150,9 +150,10 @@ def calculate_results(prediction: pd.DataFrame, ground_truth: pd.DataFrame, prom
         results.append({
             "field": field,
             "metric_type": metric_type,
-            "mean": scores.mean(),
+            "mean": mean_score,
             "ci_low": ci[0],
             "ci_high": ci[1],
+            "scores": scores.tolist()  # Store individual scores for further analysis
         })
 
     return pd.DataFrame(results)
@@ -203,7 +204,8 @@ def calculate_macro_average(results: pd.DataFrame, prompt_config: Dict[str, Any]
                 f"The following fields are missing weights: {missing_weight_fields}"
             )
 
-    means = results["mean"].to_numpy()
+    scores = np.array(results["scores"].tolist())
+    means = np.mean(scores, axis=0)
     if weight_mapping:
         results["weight"] = results["field"].map(weight_mapping).fillna(1)
         weights_arr = results["weight"].to_numpy()
