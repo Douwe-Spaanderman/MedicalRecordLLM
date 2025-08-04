@@ -143,6 +143,7 @@ class ExperimentRunner:
     def run_single_experiment(self, prompt_method: str, model_config: Path):
         model_name = model_config.stem
         output_file = self.output_dir / model_name / f"{prompt_method}.csv"
+        output_file.parent.mkdir(parents=True, exist_ok=True)
 
         timeout = self.get_timeout(model_name, prompt_method)
         max_concurrent = self.get_max_concurrent(model_name, prompt_method)
