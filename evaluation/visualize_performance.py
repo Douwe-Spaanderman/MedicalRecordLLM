@@ -24,6 +24,29 @@ custom_params = {
 }
 sns.set_theme(style=style, rc=custom_params, palette=sns.color_palette(palette))
 
+def add_ranks(ranked_results: pd.DataFrame, data_labels: List[str]) -> List[str]:
+    """
+    Add rank information to the data labels based on the ranked results DataFrame.
+    
+    Args:
+        ranked_results: DataFrame containing the ranked results.
+        data_labels: List of data labels to which ranks will be added.
+    
+    Returns:
+        List of data labels with rank information appended.
+    """
+
+    if ranked_results is not None:
+        rank_icons = {
+            1: "(1st)",
+            2: "(2nd)",
+            3: "(3rd)"
+        }
+        rank_map = ranked_results.set_index('source')['final_rank'].to_dict()
+        rank_map = {k: rank_icons.get(v) for k, v in rank_map.items() if v in rank_icons}
+        return [f"{label} {rank_map.get(label, '')}" for label in data_labels]
+    return data_labels
+
 def plot_barplot(
     data: pd.DataFrame,
     x: str,
@@ -95,17 +118,19 @@ def plot_metric_summary(
     output_file: Optional[str] = None, 
     weights: Dict[str, float] = None, 
     figsize: Tuple[int] = (15, 5),
-    data_labels: Optional[List[str]] = None
+    data_labels: Optional[List[str]] = None,
+    ranked_results: Optional[Union[str, pd.DataFrame]] = None
 ) -> None:
     """
     Plot metric summary for single or multiple DataFrames.
     
     Args:
-    - input_data: Can be a single DataFrame, a list of DataFrames, or a dictionary of DataFrames
-    - output_file: Path to save the figure (optional)
-    - weights: Dictionary of weights for fields (optional)
-    - figsize: Figure size
-    - data_labels: Labels for each DataFrame (used when input_data is a list/dict)
+        input_data: Can be a single DataFrame, a list of DataFrames, or a dictionary of DataFrames
+        output_file: Path to save the figure (optional)
+        weights: Dictionary of weights for fields (optional)
+        figsize: Figure size
+        data_labels: Labels for each DataFrame (used when input_data is a list/dict)
+        ranked_results: Path to a CSV file with ranked results or a DataFrame (optional)
     """
     # Convert input to consistent format (list of DataFrames with labels)
     if isinstance(input_data, pd.DataFrame):
@@ -120,6 +145,13 @@ def plot_metric_summary(
         dfs = input_data
         if data_labels is None:
             data_labels = [f"Data {i+1}" for i in range(len(dfs))]
+
+    if isinstance(ranked_results, str):
+        ranked_results = pd.read_csv(ranked_results)
+    elif isinstance(ranked_results, pd.DataFrame):
+        ranked_results = ranked_results
+    else:
+        ranked_results = None
     
     # Process each DataFrame and add a source label
     processed_dfs = []
@@ -165,6 +197,9 @@ def plot_metric_summary(
 
     # Shared legend for all axes, placed above the entire figure
     handles, labels = ax1.get_legend_handles_labels()
+
+    # Add rank to labels if ranked results are provided
+    labels = add_ranks(ranked_results, labels)
     fig.legend(
         handles,
         labels,
@@ -208,6 +243,13 @@ if __name__ == "__main__":
         default=None,
         help="Optional labels for each input file (must match number of input files)"
     )
+    parser.add_argument(
+        "-r",
+        "--ranked-results",
+        type=str,
+        default=None,
+        help="Path to a CSV file with ranked results or a DataFrame (optional)"
+    )
     args = parser.parse_args()
 
     # Load input data
@@ -231,5 +273,6 @@ if __name__ == "__main__":
     plot_metric_summary(
         input_data=input_data,
         output_file=args.output_file,
-        data_labels=args.data_labels if args.data_labels else None
+        data_labels=args.data_labels if args.data_labels else None,
+        ranked_results=args.ranked_results if args.ranked_results else None
     )

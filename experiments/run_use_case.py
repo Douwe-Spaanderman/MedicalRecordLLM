@@ -52,10 +52,14 @@ class ExperimentRunner:
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.performance_files = defaultdict(list)
+        self.ranked_results = defaultdict(list)
         self.logger = logging.getLogger(__name__)
         self.load_overrides()
 
     def load_overrides(self):
+        """
+        Load overrides from the provided YAML file if it exists.
+        """
         if not self.override_config_path:
             self.override_config = {}
             return
@@ -63,6 +67,17 @@ class ExperimentRunner:
         self.override_config = self.read_config(self.override_config_path)
 
     def get_timeout(self, model_name: str, prompt_method: str) -> int:
+        """
+        Get the timeout for a specific model and prompt method from the overrides.
+        If not specified, return the default timeout.
+        
+        Args:
+            model_name (str): Name of the model.
+            prompt_method (str): Prompt method being used.
+
+        Returns:
+            int: Timeout in seconds.
+        """
         model_cfg = self.override_config.get(model_name, {})
         return (
             model_cfg.get(prompt_method, {}).get("timeout") or
@@ -70,6 +85,17 @@ class ExperimentRunner:
         )
 
     def get_max_concurrent(self, model_name: str, prompt_method: str) -> int:
+        """
+        Get the max concurrent requests for a specific model and prompt method from the overrides.
+        If not specified, return the default max concurrent requests.
+
+        Args:
+            model_name (str): Name of the model.
+            prompt_method (str): Prompt method being used.
+
+        Returns:
+            int: Max concurrent requests.
+        """
         model_cfg = self.override_config.get(model_name, {})
         return (
             model_cfg.get(prompt_method, {}).get("max_concurrent") or
@@ -77,12 +103,28 @@ class ExperimentRunner:
         )
     
     def read_config(self, config_path) -> Dict[str, Any]:
+        """
+        Read a YAML configuration file and return its contents as a dictionary.
+
+        Args:
+            config_path (Path): Path to the YAML configuration file.
+
+        Returns:
+            Dict[str, Any]: Parsed configuration as a dictionary.
+        """
         with open(config_path, 'r') as file:
             return yaml.safe_load(file)
 
     def run(self):
+        """
+        Run the entire experiment workflow:
+        1. Start vLLM server for each model configuration if specified.
+        2. Run experiments for each prompt method and model configuration.
+        3. Calculate performance metrics for each experiment.
+        """
         for model_config_path in self.model_configs:
             model_config = self.read_config(model_config_path)
+            model_name = model_config.get("model", model_config_path.stem).split("/")[-1]
             if self.vllm_server:
                 vllm_process = self.start_vllm_server(model_config)
 
@@ -100,7 +142,18 @@ class ExperimentRunner:
             if vllm_process or self.dry_run:
                 self.kill_vllm_server(vllm_process)
 
+            self.logger.info(f"[Completed] All experiments for model {model_config.get('model', model_config_path.stem)}")
+
     def start_vllm_server(self, model_config: Dict[str, Any]) -> Optional[subprocess.Popen]:
+        """
+        Start the vLLM server for the given model configuration.
+
+        Args:
+            model_config (Dict[str, Any]): Model configuration dictionary.
+
+        Returns:
+            subprocess.Popen: Process handle for the vLLM server.
+        """
         if not model_config.get("model", False):
             self.logger.info(f"No model name found in {model_config}. Skipping vLLM server start.")
             return None
@@ -120,6 +173,16 @@ class ExperimentRunner:
         return subprocess.Popen(command)
 
     def wait_for_vllm_ready(self, timeout=600, interval=1):
+        """
+        Wait for the vLLM server to become ready by pinging the API endpoint.
+
+        Args:
+            timeout (int): Maximum time to wait for the server to become ready.
+            interval (int): Time to wait between pings.
+
+        Raises:
+            TimeoutError: If the server does not become ready within the timeout period.
+        """
         url = self.base_url + "models"
         start_time = time.time()
         if self.dry_run:
@@ -141,6 +204,12 @@ class ExperimentRunner:
         raise TimeoutError("vLLM server did not become ready within timeout.")
 
     def kill_vllm_server(self, process):
+        """
+        Kill the vLLM server process.
+
+        Args:
+            process (subprocess.Popen): Process handle for the vLLM server.
+        """
         if self.dry_run:
             self.logger.info("[Dry Run] Would kill vLLM server")
             return
@@ -153,6 +222,14 @@ class ExperimentRunner:
         self.logger.info("[Killed] vLLM server")
 
     def run_single_experiment(self, prompt_method: str, model_config_path: Path, model_config: Dict[str, Any]):
+        """
+        Run a single experiment for a given prompt method and model configuration.
+
+        Args:
+            prompt_method (str): The prompt method to use.
+            model_config_path (Path): Path to the model configuration file.
+            model_config (Dict[str, Any]): Model configuration dictionary.
+        """
         model_name = model_config.get("model", model_config_path.stem).split("/")[-1]
         output_file = self.output_dir / model_name / f"{prompt_method}.csv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -194,6 +271,14 @@ class ExperimentRunner:
             return
 
     def run_single_calculation(self, llm_output_path: Path, prompt_method: str, model_name: str):
+        """
+        Calculate performance metrics for a single LLM output file.
+
+        Args:
+            llm_output_path (Path): Path to the LLM output file.
+            prompt_method (str): The prompt method used.
+            model_name (str): Name of the model.
+        """
         perf_output_path = llm_output_path.with_suffix(".performance.csv")
 
         command = [
@@ -216,6 +301,12 @@ class ExperimentRunner:
             self.logger.error(e)
 
     def run_visualization(self):
+        """
+        Visualize the performance results from the LLM output files.
+
+        This function will generate plots comparing the performance of different prompt methods
+        across the models used in the experiments.
+        """
         if self.dry_run:
            self.logger.info("[Dry Run] Would visualize performance")
            return
@@ -232,9 +323,20 @@ class ExperimentRunner:
             files = [str(f) for _, f in method_files]
             labels = methods
             out_file = self.output_dir / model_name / f"all_results.png"
-            self.visualize(files, out_file, labels)
+            if self.ranked_results:
+                ranked_file = self.ranked_results.get(model_name)
+
+            self.visualize(files, out_file, labels, ranked_file)
 
     def visualize(self, input_files: List[str], output_file: Path, labels: List[str]):
+        """
+        Visualize performance results from LLM output files.
+
+        Args:
+            input_files (List[str]): List of paths to the LLM output files.
+            output_file (Path): Path to save the visualization.
+            labels (List[str]): Optional labels for each input file.
+        """
         command = [
             "python", str(project_root / "evaluation" / "visualize_performance.py"),
             "-i"
@@ -252,6 +354,60 @@ class ExperimentRunner:
             self.logger.info(f"[Visualized] {output_file}")
         except subprocess.CalledProcessError as e:
             self.logger.error(f"[Error] Failed to visualize performance results for {output_file}")
+            self.logger.error(e)
+
+    def run_ranking(self):
+        """
+        Run rank aggregation on the collected performance files.
+        
+        """
+
+        if self.dry_run:
+           self.logger.info("[Dry Run] Would run rank aggregation")
+           return
+
+        if not self.performance_files:
+            self.logger.info("No performance files found to rank.")
+            return
+        
+        self.logger.info("Starting rank aggregation of performance results...")
+
+        # Per-model comparison of prompt methods
+        for model_name, method_files in self.performance_files.items():
+            files = [str(f) for _, f in method_files]
+            out_file = self.output_dir / model_name / "ranked_results.csv"
+            self.rank(files, out_file, method="kemeny")
+
+        self.logger.info("Rank aggregation completed.")
+
+    def rank(self, input_files: List[str], output_file: Optional[Path] = None, method: str = "kemeny"):
+        """
+        Rank aggregation of multiple LLM performance files.
+
+        Args:
+            input_files (List[str]): List of paths to the LLM performance files.
+            output_file (Optional[Path]): Path to save the aggregated results. Defaults to None.
+            method (str): Method for rank aggregation. Defaults to "kemeny".
+                Options are "borda", "kemeny", or "ranked_pairs".
+        """
+        command = [
+            "python", str(project_root / "evaluation" / "rank_aggregation.py"),
+            "-i"
+        ] + input_files + [
+            "-o", str(output_file),
+            "-m", method
+        ]
+
+        if self.dry_run:
+            self.logger.info("[Dry Run] Would run rank aggregation with command: " + " ".join(command))
+            return
+
+        try:
+            subprocess.run(command, check=True)
+            self.logger.info(f"[Ranked] Results saved to {output_file}")
+            self.ranked_results[method].append(output_file)
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"[Error] Failed to run rank aggregation for {input_files}")
             self.logger.error(e)
 
 if __name__ == "__main__":
@@ -336,4 +492,5 @@ if __name__ == "__main__":
         dry_run=args.dry_run,
     )
     runner.run()
+    runner.run_ranking()
     runner.run_visualization()
