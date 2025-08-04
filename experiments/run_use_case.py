@@ -11,9 +11,9 @@ from typing import List, Dict, Optional, Any
 from collections import defaultdict
 
 try:
-    file_path = Path(os.path.realpath(__file__)).parent
+    project_root = Path(__file__).resolve().parents[1]
 except NameError:
-    file_path = Path.cwd()
+    project_root = Path.cwd().parent
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -27,6 +27,7 @@ class ExperimentRunner:
         prompt_methods: List[str],
         input_format: str,
         patient_id_col: str,
+        gpus: int,
         default_timeout: int,
         default_max_concurrent: int,
         override_config_path: Optional[Path] = None,
@@ -41,6 +42,7 @@ class ExperimentRunner:
         self.prompt_methods = prompt_methods
         self.input_format = input_format
         self.patient_id_col = patient_id_col
+        self.gpus = gpus
         self.default_timeout = default_timeout
         self.default_max_concurrent = default_max_concurrent
         self.override_config_path = override_config_path
@@ -74,8 +76,8 @@ class ExperimentRunner:
             self.default_max_concurrent
         )
     
-    def read_config(self) -> Dict[str, Any]:
-        with open(self.prompt_config_path, 'r') as file:
+    def read_config(self, config_path) -> Dict[str, Any]:
+        with open(config_path, 'r') as file:
             return yaml.safe_load(file)
 
     def run(self):
@@ -95,7 +97,7 @@ class ExperimentRunner:
             for prompt_method in self.prompt_methods:
                 self.run_single_experiment(prompt_method, model_config_path, model_config)
 
-            if vllm_process:
+            if vllm_process or self.dry_run:
                 self.kill_vllm_server(vllm_process)
 
     def start_vllm_server(self, model_config: Dict[str, Any]) -> Optional[subprocess.Popen]:
@@ -106,17 +108,22 @@ class ExperimentRunner:
         command = [
             "python", "-m", "vllm.entrypoints.openai.api_server",
             "--model", model_config["model"],
+            "--tensor-parallel-size", str(self.gpus),
+            "--dtype", "bfloat16",
         ]
         if self.dry_run:
             self.logger.info("[Dry Run] Starting vLLM server with command: " + " ".join(command))
             return None
         
-        self.logger.info(f"[Starting vLLM] {model_config.stem}")
+        self.logger.info(f"[Starting vLLM] {model_config['model']}")
         return subprocess.Popen(command)
 
     def wait_for_vllm_ready(self, timeout=600, interval=1):
         url = self.base_url + "models"
         start_time = time.time()
+        if self.dry_run:
+           self.logger.info("[Dry Run] Would ping vLLM server to see if up")
+           return True 
 
         self.logger.info("[Waiting] for vLLM server to become ready...")
 
@@ -145,7 +152,7 @@ class ExperimentRunner:
         self.logger.info("[Killed] vLLM server")
 
     def run_single_experiment(self, prompt_method: str, model_config_path: Path, model_config: Dict[str, Any]):
-        model_name = model_config("model", model_config_path.stem)
+        model_name = model_config.get("model", model_config_path.stem).split("/")[-1]
         output_file = self.output_dir / model_name / f"{prompt_method}.csv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -153,7 +160,7 @@ class ExperimentRunner:
         max_concurrent = self.get_max_concurrent(model_name, prompt_method)
 
         command = [
-            "python", file_path / "run.py",
+            "python", str(project_root / "run.py"),
             "-i", str(self.data_path),
             "-o", str(output_file),
             "-pm", prompt_method,
@@ -189,7 +196,7 @@ class ExperimentRunner:
         perf_output_path = llm_output_path.with_suffix(".performance.csv")
 
         command = [
-            "python", file_path / "evaluation" / "calculate_performance.py",
+            "python", str(project_root / "evaluation" / "calculate_performance.py"),
             "-l", str(llm_output_path),
             "-p", str(self.prompt_config_path),
             "-o", str(perf_output_path),
@@ -208,6 +215,10 @@ class ExperimentRunner:
             self.logger.error(e)
 
     def run_visualization(self):
+        if self.dry_run:
+           self.logger.info("[Dry Run] Would visualize performance")
+           return
+
         if not self.performance_files:
             self.logger.info("No performance files found to visualize.")
             return
@@ -224,7 +235,7 @@ class ExperimentRunner:
 
     def visualize(self, input_files: List[str], output_file: Path, labels: List[str]):
         command = [
-            "python", file_path / "evaluation" / "visualize_performance.py",
+            "python", str(project_root / "evaluation" / "visualize_performance.py"),
             "-i"
         ] + input_files + [
             "-o", str(output_file),
@@ -241,15 +252,6 @@ class ExperimentRunner:
         except subprocess.CalledProcessError as e:
             self.logger.error(f"[Error] Failed to visualize performance results for {output_file}")
             self.logger.error(e)
-
-def load_overrides(arg: Optional[str]) -> Dict[str, int]:
-    if not arg:
-        return {}
-    path = Path(arg)
-    if path.exists():
-        with open(path) as f:
-            return json.load(f)
-    return json.loads(arg)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run all LLM experiments.")
@@ -293,6 +295,9 @@ if __name__ == "__main__":
         "--patient-id-col", default="Patient-ID", help="Patient ID column name."
     )
     parser.add_argument(
+        "--gpus", type=int, default=4, help="How many gpus to use for VLLM tensor parallel."
+    )
+    parser.add_argument(
         "--timeout", type=int, default=240, help="Timeout for each request in seconds."
     )
     parser.add_argument(
@@ -300,7 +305,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--overrides-config",
-        type=load_overrides,
+        type=Path,
         help="YAML file with timeout and concurrent overrides for models and methods.",
     )
     parser.add_argument(
@@ -312,7 +317,7 @@ if __name__ == "__main__":
         "--dry-run", action="store_true", help="Print commands without running them."
     )
 
-    args = parser.parse.args()
+    args = parser.parse_args()
 
     runner = ExperimentRunner(
         data_path=args.data_path,
@@ -322,6 +327,7 @@ if __name__ == "__main__":
         prompt_methods=args.prompt_methods,
         input_format=args.format,
         patient_id_col=args.patient_id_col,
+        gpus=args.gpus,
         default_timeout=args.timeout,
         default_max_concurrent=args.max_concurrent,
         override_config_path=args.overrides_config,

@@ -166,3 +166,4 @@ venv/*
 
 experiment/*
 setup.sh
+slurm/*
