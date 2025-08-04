@@ -2,11 +2,20 @@ import subprocess
 import argparse
 import json
 import os
+import yaml
+import logging
+import requests
+import time
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from collections import defaultdict
 
-file_path = Path(os.path.realpath(__file__)).parent
+try:
+    file_path = Path(os.path.realpath(__file__)).parent
+except NameError:
+    file_path = Path.cwd()
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 class ExperimentRunner:
     def __init__(
@@ -24,6 +33,8 @@ class ExperimentRunner:
         concurrent_overrides: Dict[str, int],
         method_timeout_overrides: Dict[str, int],
         method_concurrent_overrides: Dict[str, int],
+        vllm_server: bool = False,
+        base_url: str = "http://localhost:8000/v1/",
         dry_run: bool = False,
     ):
         self.data_path = data_path
@@ -39,10 +50,13 @@ class ExperimentRunner:
         self.concurrent_overrides = concurrent_overrides
         self.method_timeout_overrides = method_timeout_overrides
         self.method_concurrent_overrides = method_concurrent_overrides
+        self.vllm_server = vllm_server
+        self.base_url = base_url
         self.dry_run = dry_run
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.performance_files = defaultdict(list)  # for visualization
+        self.performance_files = defaultdict(list)
+        self.logger = logging.getLogger(__name__)
 
     def get_timeout(self, model_name: str, prompt_method: str) -> int:
         return self.method_timeout_overrides.get(
@@ -55,11 +69,76 @@ class ExperimentRunner:
             prompt_method,
             self.concurrent_overrides.get(model_name, self.default_max_concurrent)
         )
+    
+    def read_prompt_config(self) -> Dict[str, Any]:
+        with open(self.prompt_config_path, 'r') as file:
+            return yaml.safe_load(file)
 
     def run(self):
-        for prompt_method in self.prompt_methods:
-            for model_config in self.model_configs:
+        for model_config in self.model_configs:
+            if self.vllm_server:
+                vllm_process = self.start_vllm_server(model_config)
+
+            try:
+                self.wait_for_vllm_ready()
+            except TimeoutError as e:
+                self.logger.error(f"[Error] vLLM server did not start in time for model {model_config.stem}")
+                if vllm_process:
+                    self.kill_vllm_server(vllm_process)
+                continue
+
+            for prompt_method in self.prompt_methods:
                 self.run_single_experiment(prompt_method, model_config)
+
+            if vllm_process:
+                self.kill_vllm_server(vllm_process)
+
+    def start_vllm_server(self, model_config: Path):
+        model_config = self.read_prompt_config(model_config)
+        if not model_config.get("model", False):
+            self.logger.info(f"No model name found in {model_config}. Skipping vLLM server start.")
+            return None
+        
+        command = [
+            "python", "-m", "vllm.entrypoints.openai.api_server",
+            "--model", model_config["model"],
+        ]
+        if self.dry_run:
+            self.logger.info("[Dry Run] Starting vLLM server with command: " + " ".join(command))
+            return None
+        
+        self.logger.info(f"[Starting vLLM] {model_config.stem}")
+        return subprocess.Popen(command)
+
+    def wait_for_vllm_ready(self, timeout=600, interval=1):
+        url = self.base_url + "models"
+        start_time = time.time()
+
+        self.logger.info("[Waiting] for vLLM server to become ready...")
+
+        while time.time() - start_time < timeout:
+            try:
+                response = requests.get(url)
+                if response.status_code == 200:
+                    self.logger.info("[Ready] vLLM server is up")
+                    return True
+            except requests.ConnectionError:
+                pass
+            time.sleep(interval)
+
+        raise TimeoutError("vLLM server did not become ready within timeout.")
+
+    def kill_vllm_server(self, process):
+        if self.dry_run:
+            self.logger.info("[Dry Run] Would kill vLLM server")
+            return
+        self.logger.info("[Killing vLLM] ...")
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        self.logger.info("[Killed] vLLM server")
 
     def run_single_experiment(self, prompt_method: str, model_config: Path):
         model_name = model_config.stem
@@ -82,22 +161,23 @@ class ExperimentRunner:
         ]
 
         if self.dry_run:
-            print("[Dry Run] Command:", " ".join(command))
+            self.logger.info("[Dry Run] Would run experiment with command: " + " ".join(command))
             return
 
         try:
             subprocess.run(command, check=True)
-            print(f"[Success] Output saved to {output_file}")
+            self.logger.info(f"[Success] Experiment completed for {prompt_method} + {model_name}")
+            self.logger.info(f"[Output] Results saved to {output_file}")
         except subprocess.CalledProcessError as e:
-            print(f"[Error] Failed: {prompt_method} + {model_name}")
-            print(e)
+            self.logger.error(f"[Error] Failed to run experiment for {prompt_method} + {model_name}")
+            self.logger.error(e)
             return
 
         try:
             self.run_single_calculation(output_file, prompt_method, model_name)
         except Exception as e:
-            print(f"[Error] Performance calculation failed for {output_file}")
-            print(e)
+            self.logger.error(f"[Error] Performance calculation failed for {output_file}")
+            self.logger.error(e)
             return
 
     def run_single_calculation(self, llm_output_path: Path, prompt_method: str, model_name: str):
@@ -111,19 +191,23 @@ class ExperimentRunner:
         ]
 
         if self.dry_run:
-            print("[Dry Run] Would calculate performance:", " ".join(command))
+            self.logger.info("[Dry Run] Would calculate performance with command: " + " ".join(command))
             return
 
         try:
             subprocess.run(command, check=True)
-            print(f"[Calculated] Performance saved to {perf_output_path}")
+            self.logger.info(f"[Calculated] Performance for {llm_output_path}")
             self.performance_files[model_name].append((prompt_method, perf_output_path))
         except subprocess.CalledProcessError as e:
-            print(f"[Error] Failed to calculate performance for {llm_output_path}")
-            print(e)
+            self.logger.error(f"[Error] Failed to calculate performance for {llm_output_path}")
+            self.logger.error(e)
 
     def run_visualization(self):
-        print("\n[Visualizing] Generating performance plots...")
+        if not self.performance_files:
+            self.logger.info("No performance files found to visualize.")
+            return
+        
+        self.logger.info("Starting visualization of performance results...")
 
         # Per-model comparison of prompt methods
         for model_name, method_files in self.performance_files.items():
@@ -143,15 +227,15 @@ class ExperimentRunner:
         ] + labels
 
         if self.dry_run:
-            print("[Dry Run] Would visualize:", " ".join(command))
+            self.logger.info("[Dry Run] Would visualize with command: " + " ".join(command))
             return
 
         try:
             subprocess.run(command, check=True)
-            print(f"[Visualized] {output_file}")
+            self.logger.info(f"[Visualized] {output_file}")
         except subprocess.CalledProcessError as e:
-            print(f"[Error] Visualization failed for {output_file}")
-            print(e)
+            self.logger.error(f"[Error] Failed to visualize performance results for {output_file}")
+            self.logger.error(e)
 
 def load_overrides(arg: Optional[str]) -> Dict[str, int]:
     if not arg:
@@ -230,6 +314,11 @@ if __name__ == "__main__":
         help="JSON string or path to JSON file with per-method concurrency overrides.",
     )
     parser.add_argument(
+        "--vllm-server",
+        action="store_true",
+        help="Run vLLM server for each model configuration.",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="Print commands without running them."
     )
 
@@ -249,6 +338,7 @@ if __name__ == "__main__":
         concurrent_overrides=load_overrides(args.concurrent_overrides),
         method_timeout_overrides=load_overrides(args.method_timeout_overrides),
         method_concurrent_overrides=load_overrides(args.method_concurrent_overrides),
+        vllm_server=args.vllm_server,
         dry_run=args.dry_run,
     )
     runner.run()
