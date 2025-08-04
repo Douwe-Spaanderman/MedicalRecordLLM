@@ -110,6 +110,7 @@ class ExperimentRunner:
             "--model", model_config["model"],
             "--tensor-parallel-size", str(self.gpus),
             "--dtype", "bfloat16",
+            "--trust-remote-code",
         ]
         if self.dry_run:
             self.logger.info("[Dry Run] Starting vLLM server with command: " + " ".join(command))
