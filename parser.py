@@ -14,7 +14,7 @@ from collections import OrderedDict
 from sentence_transformers import util
 from langchain_openai import ChatOpenAI
 from langchain_core.runnables import Runnable, RunnableLambda, RunnableParallel
-from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, AIMessagePromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate, AIMessagePromptTemplate, PromptTemplate, BasePromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
 from langchain_core.output_parsers import BaseOutputParser
 from langchain_core.callbacks.base import BaseCallbackHandler
@@ -213,6 +213,8 @@ class VLLMReportParser:
 
         self.max_concurrent = max_concurrent
         self.select_example = select_example
+        self.merge_consecutive_messages = params_config.get('merge_consecutive_messages', False)
+        self.system_instructions_allowed = params_config.get('system_instructions_allowed', True)
 
         # Load prompt configuration and method
         self.prompt_config = prompt_config
@@ -693,7 +695,7 @@ class VLLMReportParser:
             for chain in self.chains:
                 system_instructions, field_instructions, task_instructions, examples_instructions, report_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt(chain=chain)
                 prompt = [
-                    SystemMessage(system_instructions, name="system_instructions"),
+                    SystemMessage(system_instructions, name="system_instructions") if self.system_instructions_allowed else HumanMessage(system_instructions, name="system_instructions"),
                     HumanMessage(field_instructions, name="field_instructions"),
                     HumanMessage(task_instructions, name="task_instructions"),
                 ]
@@ -719,6 +721,7 @@ class VLLMReportParser:
                     HumanMessagePromptTemplate.from_template(report_instructions, name="report_instructions"),
                     HumanMessage(final_instructions, name="final_instructions")
                 ])
+                prompt = self._merge_consecutive_messages(prompt) if self.merge_consecutive_messages else prompt
                 prompt_template = ChatPromptTemplate(prompt)
                 prompt_template = prompt_template.partial(**prompt_variables)
 
@@ -729,7 +732,7 @@ class VLLMReportParser:
         else:
             system_instructions, field_instructions, task_instructions, examples_instructions, report_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt(chain=None)
             prompt = [
-                SystemMessage(system_instructions),
+                SystemMessage(system_instructions) if self.system_instructions_allowed else HumanMessage(system_instructions, name="system_instructions"),
                 HumanMessage(field_instructions, name="field_instructions"),
                 HumanMessagePromptTemplate.from_template(task_instructions, name="task_instructions"),
             ]
@@ -755,6 +758,8 @@ class VLLMReportParser:
                 HumanMessagePromptTemplate.from_template(report_instructions, name="report_instructions"),
                 HumanMessage(final_instructions, name="final_instructions")
             ])
+            prompt = self._merge_consecutive_messages(prompt) if self.merge_consecutive_messages else prompt
+
             prompt_template = ChatPromptTemplate(prompt)
             prompt_template = prompt_template.partial(**prompt_variables)
 
@@ -766,6 +771,56 @@ class VLLMReportParser:
             else:
                 # For other methods, we can use the base chain directly
                 self.chat_chain = base_chain
+
+    def _merge_consecutive_messages(self, messages: List[BaseMessage]) -> List[BaseMessage]:
+        """
+        Merge consecutive messages of the same type (user or assistant) into a single message. 
+        Required for some models that do not support multiple consecutive messages of the same type.
+
+        Args:
+            messages: List of BaseMessage objects
+        Returns:
+            List of BaseMessage objects with consecutive messages merged
+        """
+        if not messages:
+            return []
+        
+        def to_template_message(msg: Union[HumanMessage, SystemMessage, AIMessage]) -> BasePromptTemplate:
+            if isinstance(msg, HumanMessage):
+                return HumanMessagePromptTemplate.from_template(msg.content, name=msg.name)
+            elif isinstance(msg, SystemMessage):
+                return SystemMessagePromptTemplate.from_template(msg.content, name=msg.name)
+            elif isinstance(msg, AIMessage):
+                return AIMessagePromptTemplate.from_template(msg.content, name=msg.name)
+            else:
+                raise ValueError(f"Unsupported message type: {type(msg)}")
+    
+        def _create_message(cls: BasePromptTemplate, merged_template: str) -> BasePromptTemplate:
+            prompt = PromptTemplate.from_template(merged_template)
+            return cls(prompt=prompt)
+        
+        merged = []
+        prev_cls = None
+        buffer = []
+
+        for msg in messages:
+            if "PromptTemplate" not in type(msg).__name__:
+                msg = to_template_message(msg)
+
+            curr_cls = type(msg)
+
+            if curr_cls == prev_cls:
+                buffer.append(msg.prompt.template)
+            else:
+                if prev_cls is not None:
+                    merged.append(_create_message(prev_cls, "\n\n".join(buffer)))
+                prev_cls = curr_cls
+                buffer = [msg.prompt.template]
+
+        if buffer:
+            merged.append(_create_message(prev_cls, "\n\n".join(buffer)))
+
+        return merged
 
     def _create_prompt_chain_graph(self, prompt_templates: List[ChatPromptTemplate], parsers: List[ReasoningAndDynamicJSONParser]) -> Runnable:
         """
