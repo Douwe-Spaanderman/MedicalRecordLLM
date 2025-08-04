@@ -29,10 +29,7 @@ class ExperimentRunner:
         patient_id_col: str,
         default_timeout: int,
         default_max_concurrent: int,
-        timeout_overrides: Dict[str, int],
-        concurrent_overrides: Dict[str, int],
-        method_timeout_overrides: Dict[str, int],
-        method_concurrent_overrides: Dict[str, int],
+        override_config_path: Optional[Path] = None,
         vllm_server: bool = False,
         base_url: str = "http://localhost:8000/v1/",
         dry_run: bool = False,
@@ -46,10 +43,7 @@ class ExperimentRunner:
         self.patient_id_col = patient_id_col
         self.default_timeout = default_timeout
         self.default_max_concurrent = default_max_concurrent
-        self.timeout_overrides = timeout_overrides
-        self.concurrent_overrides = concurrent_overrides
-        self.method_timeout_overrides = method_timeout_overrides
-        self.method_concurrent_overrides = method_concurrent_overrides
+        self.override_config_path = override_config_path
         self.vllm_server = vllm_server
         self.base_url = base_url
         self.dry_run = dry_run
@@ -57,44 +51,54 @@ class ExperimentRunner:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.performance_files = defaultdict(list)
         self.logger = logging.getLogger(__name__)
+        self.load_overrides()
+
+    def load_overrides(self):
+        if not self.override_config_path:
+            self.override_config = {}
+            return
+        
+        self.override_config = self.read_config(self.override_config_path)
 
     def get_timeout(self, model_name: str, prompt_method: str) -> int:
-        return self.method_timeout_overrides.get(
-            prompt_method,
-            self.timeout_overrides.get(model_name, self.default_timeout)
+        model_cfg = self.override_config.get(model_name, {})
+        return (
+            model_cfg.get(prompt_method, {}).get("timeout") or
+            self.default_timeout
         )
 
     def get_max_concurrent(self, model_name: str, prompt_method: str) -> int:
-        return self.method_concurrent_overrides.get(
-            prompt_method,
-            self.concurrent_overrides.get(model_name, self.default_max_concurrent)
+        model_cfg = self.override_config.get(model_name, {})
+        return (
+            model_cfg.get(prompt_method, {}).get("max_concurrent") or
+            self.default_max_concurrent
         )
     
-    def read_prompt_config(self) -> Dict[str, Any]:
+    def read_config(self) -> Dict[str, Any]:
         with open(self.prompt_config_path, 'r') as file:
             return yaml.safe_load(file)
 
     def run(self):
-        for model_config in self.model_configs:
+        for model_config_path in self.model_configs:
+            model_config = self.read_config(model_config_path)
             if self.vllm_server:
                 vllm_process = self.start_vllm_server(model_config)
 
             try:
                 self.wait_for_vllm_ready()
             except TimeoutError as e:
-                self.logger.error(f"[Error] vLLM server did not start in time for model {model_config.stem}")
+                self.logger.error(f"[Error] vLLM server did not start in time for model {model_config("model", model_config_path.stem)}")
                 if vllm_process:
                     self.kill_vllm_server(vllm_process)
                 continue
 
             for prompt_method in self.prompt_methods:
-                self.run_single_experiment(prompt_method, model_config)
+                self.run_single_experiment(prompt_method, model_config_path, model_config)
 
             if vllm_process:
                 self.kill_vllm_server(vllm_process)
 
-    def start_vllm_server(self, model_config: Path):
-        model_config = self.read_prompt_config(model_config)
+    def start_vllm_server(self, model_config: Dict[str, Any]) -> Optional[subprocess.Popen]:
         if not model_config.get("model", False):
             self.logger.info(f"No model name found in {model_config}. Skipping vLLM server start.")
             return None
@@ -140,8 +144,8 @@ class ExperimentRunner:
             process.kill()
         self.logger.info("[Killed] vLLM server")
 
-    def run_single_experiment(self, prompt_method: str, model_config: Path):
-        model_name = model_config.stem
+    def run_single_experiment(self, prompt_method: str, model_config_path: Path, model_config: Dict[str, Any]):
+        model_name = model_config("model", model_config_path.stem)
         output_file = self.output_dir / model_name / f"{prompt_method}.csv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -154,7 +158,7 @@ class ExperimentRunner:
             "-o", str(output_file),
             "-pm", prompt_method,
             "-pc", str(self.prompt_config_path),
-            "-pa", str(model_config),
+            "-pa", str(model_config_path),
             "-f", self.input_format,
             "--patient-id-col", self.patient_id_col,
             "--timeout", str(timeout),
@@ -295,24 +299,9 @@ if __name__ == "__main__":
         "--max-concurrent", type=int, default=64, help="Max concurrent requests."
     )
     parser.add_argument(
-        "--timeout-overrides",
-        type=str,
-        help="JSON string or path to JSON file with per-model timeout overrides.",
-    )
-    parser.add_argument(
-        "--concurrent-overrides",
-        type=str,
-        help="JSON string or path to JSON file with per-model concurrency overrides.",
-    )
-    parser.add_argument(
-        "--method-timeout-overrides",
-        type=str,
-        help="JSON string or path to JSON file with per-method timeout overrides.",
-    )
-    parser.add_argument(
-        "--method-concurrent-overrides",
-        type=str,
-        help="JSON string or path to JSON file with per-method concurrency overrides.",
+        "--overrides-config",
+        type=load_overrides,
+        help="YAML file with timeout and concurrent overrides for models and methods.",
     )
     parser.add_argument(
         "--vllm-server",
@@ -335,10 +324,7 @@ if __name__ == "__main__":
         patient_id_col=args.patient_id_col,
         default_timeout=args.timeout,
         default_max_concurrent=args.max_concurrent,
-        timeout_overrides=load_overrides(args.timeout_overrides),
-        concurrent_overrides=load_overrides(args.concurrent_overrides),
-        method_timeout_overrides=load_overrides(args.method_timeout_overrides),
-        method_concurrent_overrides=load_overrides(args.method_concurrent_overrides),
+        override_config_path=args.overrides_config,
         vllm_server=args.vllm_server,
         dry_run=args.dry_run,
     )
