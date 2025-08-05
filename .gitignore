@@ -168,3 +168,4 @@ env/*
 experiment/*
 setup.sh
 slurm/*
+todo.txt

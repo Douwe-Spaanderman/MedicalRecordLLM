@@ -219,7 +219,7 @@ class VLLMReportParser:
         # Load prompt configuration and method
         self.prompt_config = prompt_config
         self.prompt_method = prompt_method
-        self.chains = self._detect_chains() if prompt_method == "PromptChain" else None
+        self.chains = self._detect_chains() if prompt_method == "PromptGraph" else None
 
         # Additional configurations
         self.patterns = self._load_patterns(patterns_path) if patterns_path else None
@@ -231,9 +231,9 @@ class VLLMReportParser:
             set_verbose(True)
             self.logger.setLevel(logging.DEBUG)
 
-        if prompt_method == "PromptChain" and self.batch_size:
+        if prompt_method == "PromptGraph" and self.batch_size:
             self.logger.warning(
-                f"Internal batch size was set to {self.batch_size}, but this is incompatible with the 'PromptChain' method. "
+                f"Internal batch size was set to {self.batch_size}, but this is incompatible with the 'PromptGraph' method. "
                 "Falling back to individual patient prompting instead."
             )
             self.batch_size = None
@@ -318,7 +318,7 @@ class VLLMReportParser:
         
         Args:
             batch_size: Original batch size
-            num_samples: Number of samples for Self-Consistency or PromptChain methods
+            num_samples: Number of samples for Self-Consistency or PromptGraph methods
         
         Returns:
             Adjusted batch size in powers of 2, ensuring it is not less than 1.
@@ -339,7 +339,7 @@ class VLLMReportParser:
 
     def _detect_chains(self) -> Optional[List[int]]:
         """
-        Detect if the prompt configuration contains chains for PromptChain method
+        Detect if the prompt configuration contains chains for PromptGraph method
 
         Returns:
             List of chain indices if chains are defined, otherwise None
@@ -461,9 +461,9 @@ class VLLMReportParser:
         
         return '\n'.join(instruction), output_format
 
-    def _format_promptchain_instructions(self, instructions: str, chain_indexes: List[int], variable_name:str) -> str:
+    def _format_promptgraph_instructions(self, instructions: str, chain_indexes: List[int], variable_name:str) -> str:
         """
-        Extract and filter instructions for PromptChain method based on chain indexes.
+        Extract and filter instructions for PromptGraph method based on chain indexes.
 
         Args:
             instructions: Full instructions string containing JSON block
@@ -529,7 +529,7 @@ class VLLMReportParser:
         Generate the prompt string based on the prompt method and configuration
 
         Args:
-            chain: Optional chain index for PromptChain method
+            chain: Optional chain index for PromptGraph method
 
         Returns:
             A list of strings representing the prompt components
@@ -553,7 +553,7 @@ class VLLMReportParser:
                     "3. If a value is missing or not mentioned, use the specified default for that field.",
                     "4. NEVER add commentary, explanations, or deviate from the output structure"
                 ]
-            elif self.prompt_method in ["CoT", "SelfConsistency", "PromptChain"]:
+            elif self.prompt_method in ["CoT", "SelfConsistency", "PromptGraph"]:
                 system_instructions = [
                     "You are a medical data extraction system that performs structured reasoning before producing output. Follow these strict rules:",
                     "1. First, reason step-by-step to identify and justify each extracted field.",
@@ -583,8 +583,8 @@ class VLLMReportParser:
         
         # Build task instruction # TODO should also be easily possible to construct this from output_format
         task_instructions = self.prompt_config['task'].strip()
-        if self.prompt_method == "PromptChain":
-            task_instructions, task_variable = self._format_promptchain_instructions(task_instructions, chain_indexes, "task_variable")
+        if self.prompt_method == "PromptGraph":
+            task_instructions, task_variable = self._format_promptgraph_instructions(task_instructions, chain_indexes, "task_variable")
         else:
             task_instructions, task_variable = self._format_json_instructions(task_instructions, "task_variable")
         
@@ -635,18 +635,18 @@ class VLLMReportParser:
                 example_instructions = {}
                 example_instructions[f"user"] = "\n".join([example['input'].strip()])
 
-                if self.prompt_method in ["CoT", "SelfConsistency", "PromptChain"]:
+                if self.prompt_method in ["CoT", "SelfConsistency", "PromptGraph"]:
                     if 'reasoning' not in example:
-                        raise ValueError("Examples for CoT, SelfConsistency, and PromptChain must include 'reasoning'")
+                        raise ValueError("Examples for CoT, SelfConsistency, and PromptGraph must include 'reasoning'")
                     
                     reasoning_instructions = example['reasoning'].strip()
-                    if self.prompt_method == "PromptChain":
+                    if self.prompt_method == "PromptGraph":
                         reasoning_instructions = reasoning_instructions.split("\n")
                         example_instructions[f"assistant_reasoning"] = "\n".join([reasoning_instructions[i] for i in chain_indexes if i < len(reasoning_instructions)])
 
                 example_outcome = example['output'].strip()
-                if self.prompt_method == "PromptChain":
-                    example_outcome, example_output_variable = self._format_promptchain_instructions(example_outcome, chain_indexes, f"example_output_variable_{idx}")
+                if self.prompt_method == "PromptGraph":
+                    example_outcome, example_output_variable = self._format_promptgraph_instructions(example_outcome, chain_indexes, f"example_output_variable_{idx}")
                 else:
                     example_outcome, example_output_variable = self._format_json_instructions(example_outcome, f"example_output_variable_{idx}")
 
@@ -669,7 +669,7 @@ class VLLMReportParser:
                 "Begin the extraction now. Your response must contain only a single valid JSON block, "
                 "enclosed in triple backticks and prefixed with `json`, like this: ```json ... ```"
             )
-        elif self.prompt_method in ["CoT", "SelfConsistency", "PromptChain"]:
+        elif self.prompt_method in ["CoT", "SelfConsistency", "PromptGraph"]:
             final_instructions = (
                 "Begin the extraction now. First, reason step-by-step to identify and justify the value for each required field, "
                 "enclosed within <think>...</think> tags. Then, output only the final structured data as a single valid JSON block, "
@@ -685,9 +685,9 @@ class VLLMReportParser:
             Runnable chain for processing reports
         """
         self.logger.info(f"Stating generating prompt using {self.prompt_method} method")
-        if self.prompt_method == "PromptChain":
+        if self.prompt_method == "PromptGraph":
             if self.chains is None:
-                raise ValueError("PromptChain method requires chain definitions in the prompt configuration")
+                raise ValueError("PromptGraph method requires chain definitions in the prompt configuration")
             
             # Generate prompts for each chain
             prompt_templates = []
@@ -837,7 +837,7 @@ class VLLMReportParser:
         from langgraph.graph import MessagesState, StateGraph, START, END
         from langgraph.checkpoint.memory import InMemorySaver
 
-        class PromptChainState(TypedDict):
+        class PromptGraphState(TypedDict):
             report: str
             patient: str
             index: int
@@ -846,14 +846,14 @@ class VLLMReportParser:
             status: str
 
         # Initialize the graph and memory
-        workflow = StateGraph(state_schema=PromptChainState)
+        workflow = StateGraph(state_schema=PromptGraphState)
         memory = InMemorySaver()
 
         for idx, (prompt_template, parser) in enumerate(zip(prompt_templates, parsers)):
             node_name = f"chain_{idx}"
             def create_node(prompt_template: ChatPromptTemplate, parser: ReasoningAndDynamicJSONParser, chain_idx: int):
                 @backoff.on_exception(backoff.expo, Exception, max_tries=3, jitter=backoff.full_jitter)
-                async def node(state: PromptChainState) -> Dict[str, Any]:
+                async def node(state: PromptGraphState) -> Dict[str, Any]:
                     try:
                         chain = prompt_template | self.llm | parser
                         result = await chain.ainvoke({"report": state["report"], "patient": state["patient"]}, timeout=self.timeout)
@@ -989,7 +989,7 @@ class VLLMReportParser:
             async with semaphore:
                 try:
                     self.logger.debug(f"Now processing patient: {item['patient']}")
-                    if self.prompt_method == "PromptChain":
+                    if self.prompt_method == "GraphChain":
                         thread_id = uuid.uuid4()
                         config = {"configurable": {"thread_id": thread_id}}
                         result = await asyncio.wait_for(self.chat_chain.ainvoke(item, config={"configurable": {"thread_id": thread_id}}), timeout=self.timeout)

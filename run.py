@@ -31,7 +31,7 @@ def main():
         "-pm",
         "--prompt-method",
         required=True,
-        choices=["ZeroShot", "OneShot", "FewShot", "CoT", "SelfConsistency", "PromptChain"],
+        choices=["ZeroShot", "OneShot", "FewShot", "CoT", "SelfConsistency", "PromptGraph"],
         type=str,
         help="prompting method"
     )

@@ -446,7 +446,7 @@ if __name__ == "__main__":
             "FewShot",
             "CoT",
             "SelfConsistency",
-            "PromptChain",
+            "PromptGraph",
         ],
         help="Prompting methods to try.",
     )
