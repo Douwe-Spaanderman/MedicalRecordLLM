@@ -27,11 +27,12 @@ class ExperimentRunner:
         prompt_methods: List[str],
         input_format: str,
         patient_id_col: str,
-        gpus: int,
         default_timeout: int,
         default_max_concurrent: int,
         override_config_path: Optional[Path] = None,
         vllm_server: bool = False,
+        gpu_parallelization: int = 1,
+        node_parallelization: int = 1,
         base_url: str = "http://localhost:8000/v1/",
         dry_run: bool = False,
     ):
@@ -42,11 +43,12 @@ class ExperimentRunner:
         self.prompt_methods = prompt_methods
         self.input_format = input_format
         self.patient_id_col = patient_id_col
-        self.gpus = gpus
         self.default_timeout = default_timeout
         self.default_max_concurrent = default_max_concurrent
         self.override_config_path = override_config_path
         self.vllm_server = vllm_server
+        self.gpu_parallelization = gpu_parallelization
+        self.node_parallelization = node_parallelization
         self.base_url = base_url
         self.dry_run = dry_run
 
@@ -161,7 +163,8 @@ class ExperimentRunner:
         command = [
             "python", "-m", "vllm.entrypoints.openai.api_server",
             "--model", model_config["model"],
-            "--tensor-parallel-size", str(self.gpus),
+            "--tensor-parallel-size", str(self.gpu_parallelization),
+            "--pipeline_parallel_size", str(self.node_parallelization),
             "--dtype", "bfloat16",
             "--trust-remote-code",
         ]
@@ -454,9 +457,6 @@ if __name__ == "__main__":
         "--patient-id-col", default="Patient-ID", help="Patient ID column name."
     )
     parser.add_argument(
-        "--gpus", type=int, default=4, help="How many gpus to use for VLLM tensor parallel."
-    )
-    parser.add_argument(
         "--timeout", type=int, default=240, help="Timeout for each request in seconds."
     )
     parser.add_argument(
@@ -473,6 +473,18 @@ if __name__ == "__main__":
         help="Run vLLM server for each model configuration.",
     )
     parser.add_argument(
+        "--gpu-parallelization",
+        type=int,
+        default=1,
+        help="Number of GPUs to use for parallelization.",
+    )
+    parser.add_argument(
+        "--node-parallelization",
+        type=int,
+        default=1,
+        help="Number of nodes to use for parallelization.",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="Print commands without running them."
     )
 
@@ -486,11 +498,12 @@ if __name__ == "__main__":
         prompt_methods=args.prompt_methods,
         input_format=args.format,
         patient_id_col=args.patient_id_col,
-        gpus=args.gpus,
         default_timeout=args.timeout,
         default_max_concurrent=args.max_concurrent,
         override_config_path=args.overrides_config,
         vllm_server=args.vllm_server,
+        gpu_parallelization=args.gpu_parallelization,
+        node_parallelization=args.node_parallelization,
         dry_run=args.dry_run,
     )
     runner.run()
