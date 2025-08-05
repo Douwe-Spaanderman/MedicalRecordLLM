@@ -325,6 +325,8 @@ class ExperimentRunner:
             out_file = self.output_dir / model_name / f"all_results.png"
             if self.ranked_results:
                 ranked_file = self.ranked_results.get(model_name)
+            else:
+                ranked_file = None
 
             self.visualize(files, out_file, labels, ranked_file)
 

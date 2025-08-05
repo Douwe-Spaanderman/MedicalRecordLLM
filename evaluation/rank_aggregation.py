@@ -138,12 +138,12 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Rank aggregation of multiple LLM performance.")
     parser.add_argument(
-        "-l",
-        "--LLM-outputs",
+        "-i",
+        "--input-files",
         required=True,
         type=Path,
         nargs='+',
-        help="Paths to the LLM performance file."
+        help="Paths to the LLM performance files."
     )
     parser.add_argument(
         "-o",
@@ -162,4 +162,4 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    rank(args.LLM_outputs, args.output_file, args.method)
+    rank(args.input_files, args.output_file, args.method)
