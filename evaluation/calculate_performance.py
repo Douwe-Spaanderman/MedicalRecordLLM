@@ -113,10 +113,13 @@ def calculate_results(prediction: pd.DataFrame, ground_truth: pd.DataFrame, prom
     results = []
     for field, meta in prompt_config.items():
         # Calculate metrics depending on the field type
-        if meta.get("type") in ["string", "number", "binary", "boolean", "categorical", "number_or_missing", "binary_of_missing" "boolean_or_missing"]:
+        if meta.get("type") in ["string", "number", "float", "binary", "boolean", "categorical", "number_or_missing", "binary_of_missing", "boolean_or_missing"]:
             if "options" in meta:
                 # Calculate the mean accuracy and standard deviation for categorical fields
-                scores = (prediction[field] == ground_truth[field]).astype(int)
+                if meta.get("type") in ["number", "float", "binary"]:
+                    scores = (prediction[field].astype(float) == ground_truth[field].astype(float)).astype(int)
+                else:
+                    scores = (prediction[field] == ground_truth[field]).astype(int)
                 metric_type = "accuracy"
             else:
                 # Semantic similarity for free text
