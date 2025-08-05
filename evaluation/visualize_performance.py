@@ -146,7 +146,7 @@ def plot_metric_summary(
         if data_labels is None:
             data_labels = [f"Data {i+1}" for i in range(len(dfs))]
 
-    if isinstance(ranked_results, str):
+    if isinstance(ranked_results, str) and ranked_results != 'None':
         ranked_results = pd.read_csv(ranked_results)
     elif isinstance(ranked_results, pd.DataFrame):
         ranked_results = ranked_results
