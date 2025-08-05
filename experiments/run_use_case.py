@@ -60,7 +60,7 @@ class ExperimentRunner:
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.performance_files = defaultdict(list)
-        self.ranked_results = defaultdict(list)
+        self.ranked_results = defaultdict(str)
         self.logger = logging.getLogger(__name__)
         self.load_overrides()
 
@@ -333,10 +333,7 @@ class ExperimentRunner:
             files = [str(f) for _, f in method_files]
             labels = methods
             out_file = self.output_dir / model_name / f"all_results.png"
-            if self.ranked_results:
-                ranked_file = self.ranked_results.get(model_name)
-            else:
-                ranked_file = None
+            ranked_file = self.ranked_results.get(model_name, None)
 
             self.visualize(files, out_file, labels, ranked_file)
 
@@ -419,7 +416,7 @@ class ExperimentRunner:
         try:
             subprocess.run(command, check=True)
             self.logger.info(f"[Ranked] Results saved to {output_file}")
-            self.ranked_results[method].append(output_file)
+            self.ranked_results[method] += str(output_file)
         except subprocess.CalledProcessError as e:
             self.logger.error(f"[Error] Failed to run rank aggregation for {input_files}")
             self.logger.error(e)
