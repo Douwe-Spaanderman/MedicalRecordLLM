@@ -31,8 +31,11 @@ class ExperimentRunner:
         default_max_concurrent: int,
         override_config_path: Optional[Path] = None,
         vllm_server: bool = False,
+        precision: str = "bfloat16",
+        quantization: Optional[None] = None,
         gpu_parallelization: int = 1,
         node_parallelization: int = 1,
+        vllm_timeout: int = 600,
         base_url: str = "http://localhost:8000/v1/",
         dry_run: bool = False,
     ):
@@ -47,8 +50,11 @@ class ExperimentRunner:
         self.default_max_concurrent = default_max_concurrent
         self.override_config_path = override_config_path
         self.vllm_server = vllm_server
+        self.precision = precision
+        self.quantization = quantization
         self.gpu_parallelization = gpu_parallelization
         self.node_parallelization = node_parallelization
+        self.vllm_timeout = vllm_timeout
         self.base_url = base_url
         self.dry_run = dry_run
 
@@ -131,9 +137,9 @@ class ExperimentRunner:
                 vllm_process = self.start_vllm_server(model_config)
 
             try:
-                self.wait_for_vllm_ready()
+                self.wait_for_vllm_ready(timeout=self.vllm_timeout)
             except TimeoutError as e:
-                self.logger.error(f"[Error] vLLM server did not start in time for model {model_config("model", model_config_path.stem)}")
+                self.logger.error(f"[Error] vLLM server did not start in time for model {model_config('model', model_config_path.stem)}")
                 if vllm_process:
                     self.kill_vllm_server(vllm_process)
                 continue
@@ -165,7 +171,8 @@ class ExperimentRunner:
             "--model", model_config["model"],
             "--tensor-parallel-size", str(self.gpu_parallelization),
             "--pipeline_parallel_size", str(self.node_parallelization),
-            "--dtype", "bfloat16",
+            "--dtype", str(self.precision),
+            "--quantization", str(self.quantization),
             "--trust-remote-code",
         ]
         if self.dry_run:
@@ -333,7 +340,7 @@ class ExperimentRunner:
 
             self.visualize(files, out_file, labels, ranked_file)
 
-    def visualize(self, input_files: List[str], output_file: Path, labels: List[str]):
+    def visualize(self, input_files: List[str], output_file: Path, labels: List[str], ranked_file: Optional[str] = None):
         """
         Visualize performance results from LLM output files.
 
@@ -348,7 +355,9 @@ class ExperimentRunner:
         ] + input_files + [
             "-o", str(output_file),
             "-l"
-        ] + labels
+        ] + labels + [
+            "-r", str(ranked_file),
+        ]
 
         if self.dry_run:
             self.logger.info("[Dry Run] Would visualize with command: " + " ".join(command))
@@ -473,6 +482,20 @@ if __name__ == "__main__":
         help="Run vLLM server for each model configuration.",
     )
     parser.add_argument(
+        "--precision", 
+        type=str,
+        choices=["auto", "bfloat16", "float", "float16", "float32", "half"], 
+        default="bfloat16",
+        help="Data type for model weights and activations.",
+    )
+    parser.add_argument(
+        "--quantization", 
+        type=str,
+        choices=["None", "awq"], 
+        default=None,
+        help="Quantization to use.",
+    )
+    parser.add_argument(
         "--gpu-parallelization",
         type=int,
         default=1,
@@ -483,6 +506,12 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Number of nodes to use for parallelization.",
+    )
+    parser.add_argument(
+        "--vllm-timeout",
+        type=int,
+        default=600,
+        help="Number of GPUs to use for parallelization.",
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Print commands without running them."
@@ -504,6 +533,7 @@ if __name__ == "__main__":
         vllm_server=args.vllm_server,
         gpu_parallelization=args.gpu_parallelization,
         node_parallelization=args.node_parallelization,
+        vllm_timeout=args.vllm_timeout,
         dry_run=args.dry_run,
     )
     runner.run()
