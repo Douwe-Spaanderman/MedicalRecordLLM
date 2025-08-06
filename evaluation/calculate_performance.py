@@ -6,6 +6,9 @@ import yaml
 from sklearn.metrics import balanced_accuracy_score
 from sentence_transformers import SentenceTransformer, util
 
+import warnings
+warnings.filterwarnings("ignore", message="y_pred contains classes not in y_true")
+
 def safe_literal_eval(val: Union[str, None]) -> Union[None, List[Any]]:
     """
     Safely evaluate a string representation of a Python literal.
@@ -181,7 +184,7 @@ def bootstrap_ci_macro(results: pd.DataFrame, n_resamples: int = 1000, confidenc
             total_weight += weight
 
         bootstrap_stats[i] = total / total_weight if total_weight > 0 else 0
-        
+
     # Calculate confidence interval
     alpha = (1 - confidence_level) / 2
     ci_low = np.percentile(bootstrap_stats, 100 * alpha)
@@ -228,13 +231,14 @@ def calculate_results(
 
         # Clean missing values
         for df in [ground_truth, prediction]:
-            df[field] = df[field].fillna(default_value)
             df[field] = df[field].apply(
                 lambda x: default_value if (
-                    pd.isna(x) or (isinstance(x, str) and x.strip().lower() in {"none", "not specified", "not applicable", "missing", "unknown", None})
+                    (isinstance(x, list) and (len(x) == 0 or pd.isna(x).any()))
+                    or (not isinstance(x, list) and pd.isna(x))
+                    or (isinstance(x, str) and x.strip().lower() in {"none", "not specified", "not applicable", "missing", "unknown", None})
                 ) else x
             )
-
+            
         # Calculate metrics depending on the field type
         if type_value in {"string", "number", "float", "binary", "boolean", "categorical"}:
             if "options" in meta:
