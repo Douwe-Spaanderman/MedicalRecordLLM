@@ -989,7 +989,7 @@ class VLLMReportParser:
             async with semaphore:
                 try:
                     self.logger.debug(f"Now processing patient: {item['patient']}")
-                    if self.prompt_method == "GraphChain":
+                    if self.prompt_method == "PromptGraph":
                         thread_id = uuid.uuid4()
                         config = {"configurable": {"thread_id": thread_id}}
                         result = await asyncio.wait_for(self.chat_chain.ainvoke(item, config={"configurable": {"thread_id": thread_id}}), timeout=self.timeout)
