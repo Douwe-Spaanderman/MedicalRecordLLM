@@ -60,7 +60,7 @@ class ExperimentRunner:
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.performance_files = defaultdict(list)
-        self.ranked_results = defaultdict(str)
+        self.ranked_results = {}
         self.logger = logging.getLogger(__name__)
         self.load_overrides()
 
@@ -387,16 +387,17 @@ class ExperimentRunner:
         for model_name, method_files in self.performance_files.items():
             files = [str(f) for _, f in method_files]
             out_file = self.output_dir / model_name / "ranked_results.csv"
-            self.rank(files, out_file, method="kemeny")
+            self.rank(files, model_name, out_file, method="kemeny")
 
         self.logger.info("Rank aggregation completed.")
 
-    def rank(self, input_files: List[str], output_file: Optional[Path] = None, method: str = "kemeny"):
+    def rank(self, input_files: List[str], model_name: str, output_file: Optional[Path] = None, method: str = "kemeny"):
         """
         Rank aggregation of multiple LLM performance files.
 
         Args:
             input_files (List[str]): List of paths to the LLM performance files.
+            model_name (str): name of model
             output_file (Optional[Path]): Path to save the aggregated results. Defaults to None.
             method (str): Method for rank aggregation. Defaults to "kemeny".
                 Options are "borda", "kemeny", or "ranked_pairs".
@@ -416,7 +417,7 @@ class ExperimentRunner:
         try:
             subprocess.run(command, check=True)
             self.logger.info(f"[Ranked] Results saved to {output_file}")
-            self.ranked_results[method] += str(output_file)
+            self.ranked_results[model_name] = str(output_file)
         except subprocess.CalledProcessError as e:
             self.logger.error(f"[Error] Failed to run rank aggregation for {input_files}")
             self.logger.error(e)
