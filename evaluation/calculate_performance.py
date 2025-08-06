@@ -3,7 +3,7 @@ import numpy as np
 from typing import Dict, Any, Union, Optional, List
 import ast
 import yaml
-from scipy.stats import t
+from sklearn.metrics import balanced_accuracy_score
 from sentence_transformers import SentenceTransformer, util
 
 def safe_literal_eval(val: Union[str, None]) -> Union[None, List[Any]]:
@@ -89,8 +89,114 @@ def calculate_list_similarity(pred_list: List[str], gt_list: List[str], sentence
 
     return (gt_to_pred + pred_to_gt) / 2
 
+def bootstrap_ci(data:tuple, statistic_fn, n_resamples:int=1000, confidence_level:float=0.95, paired:bool=False):
+    """
+    Compute bootstrap confidence intervals.
+    
+    Args:
+        data: Input data (tuple of arrays for paired statistics)
+        statistic_fn: Function to compute the statistic
+        n_resamples: Number of bootstrap samples
+        confidence_level: Confidence level for the interval
+        paired: Whether the data is paired (multiple arrays that should be resampled together)
+    """
+    np.random.seed(42)  # For reproducibility
+    
+    # Calculate the original statistic
+    original_stat = statistic_fn(*data) if paired else statistic_fn(data)
+    
+    # Prepare storage for bootstrap statistics
+    bootstrap_stats = np.zeros(n_resamples)
+    
+    n_samples = len(data[0]) if paired else len(data)
+    
+    for i in range(n_resamples):
+        # Generate bootstrap sample indices
+        indices = np.random.choice(n_samples, size=n_samples, replace=True)
+        
+        if paired:
+            # For paired data, resample all arrays with the same indices
+            resampled_data = tuple(arr[indices] for arr in data)
+            bootstrap_stats[i] = statistic_fn(*resampled_data)
+        else:
+            # For single array, just resample
+            resampled_data = data[indices]
+            bootstrap_stats[i] = statistic_fn(resampled_data)
+    
+    # Calculate confidence interval
+    alpha = (1 - confidence_level) / 2
+    ci_low = np.percentile(bootstrap_stats, 100 * alpha)
+    ci_high = np.percentile(bootstrap_stats, 100 * (1 - alpha))
+    
+    return original_stat, ci_low, ci_high
 
-def calculate_results(prediction: pd.DataFrame, ground_truth: pd.DataFrame, prompt_config: Dict[str, Any], sentence_model: SentenceTransformer) -> pd.DataFrame:
+def bootstrap_ci_macro(results: pd.DataFrame, n_resamples: int = 1000, confidence_level: float = 0.95):
+    """
+    
+    """
+    scores = [result["scores"] for result in results]
+    weights = [result["weight"] for result in results]
+    metrics = [result["metric_type"] for result in results]
+
+    np.random.seed(42)  # For reproducibility
+
+    # Calculate the original statistic
+    total = 0
+    total_weight = 0
+    for score, weight, metric in zip(scores, weights, metrics):
+        if metric == 'balanced_accuracy':
+            # For balanced accuracy, args contains resampled (y_true, y_pred) pairs
+            y_true, y_pred = score[0], score[1]
+            score = balanced_accuracy_score(y_true, y_pred)
+        else:
+            # For other metrics, args contains resampled scores
+            score = np.mean(score)
+        
+        total += score * weight
+        total_weight += weight
+            
+    original_stat = total / total_weight if total_weight > 0 else 0
+
+    # Prepare storage for bootstrap statistics
+    bootstrap_stats = np.zeros(n_resamples)
+    
+    n_samples = len(scores[0][0]) if metrics[0] == 'balanced_accuracy' else len(scores[0])
+
+    for i in range(n_resamples):
+        # Generate bootstrap sample indices
+        indices = np.random.choice(n_samples, size=n_samples, replace=True)
+
+        total = 0
+        total_weight = 0
+        for score, weight, metric in zip(scores, weights, metrics):
+            if metric == 'balanced_accuracy':
+                # For balanced accuracy, args contains resampled (y_true, y_pred) pairs
+                y_true, y_pred = score[0][indices], score[1][indices]
+                score_ = balanced_accuracy_score(y_true, y_pred)
+            else:
+                # For other metrics, args contains resampled scores
+                score_ = np.mean(score[indices])
+            
+            total += score_ * weight
+            total_weight += weight
+
+        bootstrap_stats[i] = total / total_weight if total_weight > 0 else 0
+        
+    # Calculate confidence interval
+    alpha = (1 - confidence_level) / 2
+    ci_low = np.percentile(bootstrap_stats, 100 * alpha)
+    ci_high = np.percentile(bootstrap_stats, 100 * (1 - alpha))
+    
+    return original_stat, ci_low, ci_high
+
+def calculate_results(
+    prediction: pd.DataFrame, 
+    ground_truth: pd.DataFrame, 
+    prompt_config: Dict[str, Any], 
+    sentence_model: SentenceTransformer, 
+    weights: Optional[List[int]] = None,
+    n_bootstrap: int = 1000
+) -> pd.DataFrame:    
     """
     Calculate performance metrics comparing prediction against ground truth.
     
@@ -99,8 +205,10 @@ def calculate_results(prediction: pd.DataFrame, ground_truth: pd.DataFrame, prom
         ground_truth (pd.DataFrame): DataFrame containing ground truth values.
         prompt_config (Dict[str, Any]): Configuration dictionary defining fields and their types.
         sentence_model (SentenceTransformer): Pretrained sentence transformer model for semantic similarity.
+        weights (Optional[List[int]]): Weights for each field used for macro averaging. This overrides the weights defined in the prompt config.
+        n_bootstrap (int): Number of bootstrap samples for confidence interval calculation.
     Returns:
-        pd.DataFrame: DataFrame containing calculated metrics for each field.
+        pd.DataFrame: DataFrame containing calculated metrics for each field plus macro average.
     """
     # Sanity check if prediction and ground_truth have the same columns and length
     if not prediction.columns.equals(ground_truth.columns):
@@ -109,26 +217,58 @@ def calculate_results(prediction: pd.DataFrame, ground_truth: pd.DataFrame, prom
     if len(prediction) != len(ground_truth):
         raise ValueError("Prediction and ground truth DataFrames must have the same number of rows.")
     
-    # Initialize results DataFrame
     results = []
+    field_weights = []
     for field, meta in prompt_config.items():
+        default_value = meta.get("default", "Unknown")
+        type_value = meta.get("type", "string").replace("_or_missing", "")
+        # Check for weights
+        field_weight = meta.get("weight", 1) if weights is None else weights[list(prompt_config.keys()).index(field)]
+        field_weights.append(field_weight)
+
+        # Clean missing values
+        for df in [ground_truth, prediction]:
+            df[field] = df[field].fillna(default_value)
+            df[field] = df[field].apply(
+                lambda x: default_value if (
+                    pd.isna(x) or (isinstance(x, str) and x.strip().lower() in {"none", "not specified", "not applicable", "missing", "unknown", None})
+                ) else x
+            )
+
         # Calculate metrics depending on the field type
-        if meta.get("type") in ["string", "number", "float", "binary", "boolean", "categorical", "number_or_missing", "binary_of_missing", "boolean_or_missing"]:
+        if type_value in {"string", "number", "float", "binary", "boolean", "categorical"}:
             if "options" in meta:
-                # Calculate the mean accuracy and standard deviation for categorical fields
-                if meta.get("type") in ["number", "float", "binary"]:
-                    scores = (prediction[field].astype(float) == ground_truth[field].astype(float)).astype(int)
-                else:
-                    scores = (prediction[field] == ground_truth[field]).astype(int)
-                metric_type = "accuracy"
+                # Calculate the balanced accuracy for categorical fields
+                if type_value in {"number", "float", "binary", "boolean"}:
+                    # Ensure both prediction and ground truth are numeric
+                    prediction[field] = pd.to_numeric(prediction[field], errors='coerce')
+                    ground_truth[field] = pd.to_numeric(ground_truth[field], errors='coerce')
+
+                    # Convert all to strings and replace NaN with sentinel
+                    prediction[field] = prediction[field].fillna(default_value).astype(str)
+                    ground_truth[field] = ground_truth[field].fillna(default_value).astype(str)
+
+                scores = (ground_truth[field].to_numpy(), prediction[field].to_numpy())
+                score, ci_low, ci_high = bootstrap_ci(
+                    scores,
+                    balanced_accuracy_score,
+                    n_resamples=n_bootstrap,
+                    paired=True
+                )
+                metric_type = "balanced_accuracy"
             else:
                 # Semantic similarity for free text
                 scores = pd.Series([
                     calculate_similarity(str(p), str(g), sentence_model)
                     for p, g in zip(prediction[field], ground_truth[field])
-                ])
+                ]).to_numpy()
+                score, ci_low, ci_high = bootstrap_ci(
+                    scores, 
+                    np.mean, 
+                    n_resamples=n_bootstrap
+                )
                 metric_type = "semantic_similarity"
-        elif meta.get("type") in ["list", 'list_of_missing']:
+        elif type_value == "list":
             # Ensure both prediction and ground truth are lists
             prediction[field] = prediction[field].apply(lambda x: x if isinstance(x, list) else [])
             ground_truth[field] = ground_truth[field].apply(
@@ -137,100 +277,48 @@ def calculate_results(prediction: pd.DataFrame, ground_truth: pd.DataFrame, prom
             scores = pd.Series([
                 calculate_list_similarity(p, g, sentence_model)
                 for p, g in zip(prediction[field], ground_truth[field])
-            ])
+            ]).to_numpy()
+            score, ci_low, ci_high = bootstrap_ci(
+                scores, 
+                np.mean, 
+                n_resamples=n_bootstrap
+            )
             metric_type = "list_similarity"
-        elif meta.get("type") in ["dictionary", "dict", "dictionary_or_missing", "dict_of_missing"]:
+        elif type_value in {"dictionary", "dict"}:
             raise NotImplementedError("Dictionary type fields are not supported yet.")
         else:
             raise ValueError(f"Unsupported field type for field '{field}': {meta.get('type')}")
         
-        # Calculate 95% confidence interval
-        n = len(scores)
-        mean_score = scores.mean()
-        std_err = scores.std(ddof=1) / np.sqrt(n)
-        ci = t.interval(0.95, df=n-1, loc=mean_score, scale=std_err)
-        
         results.append({
             "field": field,
             "metric_type": metric_type,
-            "mean": mean_score,
-            "ci_low": ci[0],
-            "ci_high": ci[1],
-            "scores": scores.tolist()  # Store individual scores for further analysis
+            "score": score,
+            "ci_low": ci_low,
+            "ci_high": ci_high,
+            "weight": field_weight,
+            "scores": scores,
         })
+
+    # Calculate macro average
+    if results:
+        macro_mean, macro_ci_low, macro_ci_high = bootstrap_ci_macro(
+            results=results,
+            n_resamples=n_bootstrap
+        )
+        
+        macro_results = {
+            "field": "All Fields",
+            "metric_type": "macro_avg",
+            "score": macro_mean,
+            "ci_low": macro_ci_low,
+            "ci_high": macro_ci_high,
+            "weight": None,
+            "scores": None
+        }
+        results.append(macro_results)
 
     return pd.DataFrame(results)
 
-def calculate_macro_average(results: pd.DataFrame, prompt_config: Dict[str, Any], weights: Optional[List[int]] = None) -> pd.DataFrame:
-    """
-    Calculate macro-average of all metrics in the results DataFrame.
-
-    Args:
-        results (pd.DataFrame): DataFrame containing calculated metrics for each field.
-        prompt_config (Dict[str, Any]): Configuration dictionary defining fields and their types.
-        weights (Optional[List[int]]): Weights for each field used for macro averaging. This overrides the weights defined in the prompt config.
-    Returns:
-        pd.DataFrame: DataFrame with macro averages.
-    """
-    result_fields = list(results["field"])
-    num_fields = len(result_fields)
-
-    # Handle weights override
-    if weights is not None:
-        if len(weights) != num_fields:
-            raise ValueError(f"Length of weights ({len(weights)}) does not match number of result fields ({num_fields}).")
-        weight_mapping = {field: weight for field, weight in zip(result_fields, weights)}
-        print("Using overridden weights:")
-        for field in result_fields:
-            print(f"  {field}: {weight_mapping[field]}")
-    else:
-        # Attempt to collect weights from prompt_config
-        weight_mapping = {}
-        missing_weight_fields = []
-
-        for field in result_fields:
-            config = prompt_config.get(field)
-            if config and "weight" in config:
-                weight_mapping[field] = config["weight"]
-            else:
-                missing_weight_fields.append(field)
-
-        if len(missing_weight_fields) == 0:
-            print("Using weights from prompt_config:")
-            for field in result_fields:
-                print(f"  {field}: {weight_mapping[field]}")
-        elif len(missing_weight_fields) == num_fields:
-            weight_mapping = None
-        else:
-            raise ValueError(
-                f"Incomplete weight definitions in prompt_config. "
-                f"The following fields are missing weights: {missing_weight_fields}"
-            )
-
-    scores = np.array(results["scores"].tolist())
-    means = np.mean(scores, axis=0)
-    if weight_mapping:
-        results["weight"] = results["field"].map(weight_mapping).fillna(1)
-        weights_arr = results["weight"].to_numpy()
-        macro_avg = np.average(means, weights=weights_arr)
-
-        std_err = np.sqrt(np.average((means - macro_avg) ** 2, weights=weights_arr)) / np.sqrt(len(means))
-    else:
-        macro_avg = np.mean(means)
-        std_err = np.std(means, ddof=1) / np.sqrt(len(means))
-
-    n = len(means)
-    ci = t.interval(0.95, df=n - 1, loc=macro_avg, scale=std_err)
-    macro_results = {
-        "field": "All Fields",
-        "metric_type": "macro_avgs",
-        "mean": macro_avg,
-        "ci_low": ci[0],
-        "ci_high": ci[1],
-    }
-    return pd.concat([results, pd.DataFrame([macro_results])], ignore_index=True)
-
-    
 def process_results(LLM_output: Union[pd.DataFrame, str], prompt_config: Union[Dict[str, Any], str], ground_truth: Optional[Union[pd.DataFrame, str]] = None, sentence_model: str = "all-mpnet-base-v2", scoring_weights: Optional[List[int]] = None, output_file: Optional[str] = None) -> None:
     """
     Process LLM output and compare it against ground truth.
@@ -286,10 +374,7 @@ def process_results(LLM_output: Union[pd.DataFrame, str], prompt_config: Union[D
     sentence_model = SentenceTransformer(sentence_model)
 
     # Calculate results
-    results = calculate_results(prediction, ground_truth, prompt_config, sentence_model)
-
-    # Calculate macro (weighted) average of all metrics
-    results = calculate_macro_average(results, prompt_config, scoring_weights)
+    results = calculate_results(prediction, ground_truth, prompt_config, sentence_model, scoring_weights)
 
     # If output file is specified, save the results
     if output_file:
