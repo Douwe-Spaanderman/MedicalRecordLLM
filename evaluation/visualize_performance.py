@@ -164,7 +164,7 @@ def plot_metric_summary(
     combined_results = pd.concat(processed_dfs)
     
     # Separate metric types
-    avg_df = combined_results[combined_results["metric_type"] == "micro_avgs"]
+    avg_df = combined_results[combined_results["metric_type"] == "micro_avg"]
     acc_df = combined_results[combined_results["metric_type"] == "accuracy"]
     sim_df = combined_results[combined_results["metric_type"].str.contains("similarity")]
     num_avg = len(avg_df["field"].unique())
