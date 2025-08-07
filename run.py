@@ -5,6 +5,9 @@ from parser import VLLMReportParser
 from adapters import DataFrameAdapter, JsonAdapter
 import yaml
 import json
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def load_config(config_path: str) -> dict:
     """Load configuration from YAML file"""
@@ -136,6 +139,11 @@ def main():
         action="store_true",
         help="Do you want to print intermediates, such as raw prompts etc. (Nice for debugging but slows down workflow quite a bit)"
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Do you want to do a dry run, trying out the whole workflow without running the LLM"
+    )
 
     args = parser.parse_args()
     
@@ -158,6 +166,7 @@ def main():
         select_example=args.select_example,
         patterns_path=args.regex,
         save_raw_output=args.save_raw,
+        dry_run=args.dry_run,
         verbose=args.verbose,
     )
 
@@ -182,13 +191,17 @@ def main():
     
     # Save output
     output_path = Path(args.output)
-    if args.format == "csv":
-        result.to_csv(output_path, index=False)
+    if not args.dry_run:
+        if args.format == "csv":
+            result.to_csv(output_path, index=False)
+        else:
+            with open(output_path, 'w') as f:
+                json.dump(result, f, indent=2)
+        
+        logging.info(f"[Saving] Results saved to {output_path}")
     else:
-        with open(output_path, 'w') as f:
-            json.dump(result, f, indent=2)
-    
-    print(f"Results saved to {output_path}")
+        logging.info(f"[Dry Run] Results would be saved to {output_path}")
+
 
 if __name__ == "__main__":
     main()

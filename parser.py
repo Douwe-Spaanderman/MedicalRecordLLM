@@ -6,6 +6,7 @@ import asyncio
 import time
 import math
 import uuid
+import random
 import numpy as np
 from tqdm.asyncio import tqdm_asyncio
 from collections import Counter
@@ -15,6 +16,7 @@ from sentence_transformers import util
 from langchain_openai import ChatOpenAI
 from langchain_core.runnables import Runnable, RunnableLambda, RunnableParallel
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate, AIMessagePromptTemplate, PromptTemplate, BasePromptTemplate
+from langchain_core.prompt_values import ChatPromptValue
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
 from langchain_core.output_parsers import BaseOutputParser
 from langchain_core.callbacks.base import BaseCallbackHandler
@@ -26,7 +28,7 @@ import backoff
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 class ReasoningAndDynamicJSONParser(BaseOutputParser):
-    def __init__(self, output_format: Dict[str, Any]):
+    def __init__(self, output_format: Dict[str, Any], dry_run: bool = False):
         # Build pydantic fields dynamically from output_format
         fields = {}
         for key, val in output_format.items():
@@ -46,8 +48,16 @@ class ReasoningAndDynamicJSONParser(BaseOutputParser):
 
         self._output_model = create_model("ExtractedData", **fields)
         self._logger = logging.getLogger(__name__)
+        self._dry_run = dry_run
 
     def parse(self, text: str) -> Dict[str, Any]:
+        if self._dry_run:
+            return {
+                "raw_output": text,
+                "reasoning": text,
+                "extracted_data": self._output_model().dict()
+            }
+        
         # Extract <think>...</think>
         reasoning_match = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
         reasoning = reasoning_match.group(1).strip() if reasoning_match else None
@@ -89,6 +99,28 @@ class ReasoningAndDynamicJSONParser(BaseOutputParser):
             "reasoning": reasoning,
             "extracted_data": extracted_data,
         }
+
+class DummyLLM(Runnable):
+    """A dummy LLM that returns predictable outputs for dry run testing."""
+    def __init__(self, response: str = "[DRY RUN] This is a mock response"):
+        self.response = response
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.INFO)
+
+    def _return(self, message: ChatPromptValue) -> AIMessage:
+        message = "\n".join(
+            f"[{m.type.upper()}]\n{m.content}" for m in message.to_messages()
+        )
+        self.logger.info(
+            "\n=== [Dry run] Prompt Messages ===" + "\n" + message + "\n" + "================================="
+        )
+        return AIMessage(content=self.response)
+
+    async def ainvoke(self, message: ChatPromptValue, config: Dict[str, Any] = None) -> AIMessage:
+        return self._return(message)
+
+    def invoke(self, message: ChatPromptValue, config: Dict[str, Any] = None) -> AIMessage:
+        return self._return(message)
 
 class FastEnsemble(Runnable):
     def __init__(self, embedding_model: str = "all-mpnet-base-v2"):
@@ -169,7 +201,8 @@ class VLLMReportParser:
         select_example: Optional[str] = None,
         patterns_path: Optional[str] = None,
         save_raw_output: bool = False,
-        verbose: bool = False
+        verbose: bool = False,
+        dry_run: bool = False
     ):
         """
         Initialize the parser with vLLM configuration
@@ -187,6 +220,7 @@ class VLLMReportParser:
             patterns_path: Path to JSON file with optional extraction patterns
             save_raw_output: Save raw model outputs to data
             verbose: Enable verbose logging for debugging
+            dry_run: Enable dry run for sanity checking without llm
         """
         # Initialize OpenAI client
         self.llm = ChatOpenAI(
@@ -238,6 +272,11 @@ class VLLMReportParser:
             )
             self.batch_size = None
 
+        self.dry_run = dry_run
+        if self.dry_run:
+            self.logger.info("[Dry Run] mode enabled - No actual API calls will be made")
+            self.logger.setLevel(logging.INFO) if not self.verbose else self.logger.setLevel(logging.DEBUG)
+
         self.logger.info("Initializing VLLMReportParser with the following configuration:")
         self.logger.info(f"Model: {params_config.get('model')}")
         self.logger.info(f"Prompt Method: {self.prompt_method}")
@@ -246,8 +285,10 @@ class VLLMReportParser:
         self.logger.info(f"Batch Size: {self.batch_size}")
         self.logger.info(f"Timeout: {self.timeout} seconds")
         self.logger.info(f"Max Concurrent Requests: {self.max_concurrent}")
-        if self.chains:
-            self.logger.info(f"Using the following chain sequence: {self.chains}")
+
+        if self.dry_run:
+            self.llm = DummyLLM()
+            self.max_concurrent, self.batch_size = 1, None # Setting this for easier debugging 
 
         # Generate the chat chains based on the prompt method
         self._generate_chat_chain()
@@ -726,7 +767,7 @@ class VLLMReportParser:
                 prompt_template = prompt_template.partial(**prompt_variables)
 
                 prompt_templates.append(prompt_template)
-                parsers.append(ReasoningAndDynamicJSONParser(output_format))
+                parsers.append(ReasoningAndDynamicJSONParser(output_format, dry_run=self.dry_run))
             
             self.chat_chain = self._create_prompt_chain_graph(prompt_templates, parsers)
         else:
@@ -763,7 +804,7 @@ class VLLMReportParser:
             prompt_template = ChatPromptTemplate(prompt)
             prompt_template = prompt_template.partial(**prompt_variables)
 
-            parser = ReasoningAndDynamicJSONParser(output_format)
+            parser = ReasoningAndDynamicJSONParser(output_format, dry_run=self.dry_run)
             base_chain = prompt_template | self.llm | parser
             if self.prompt_method == "SelfConsistency":
                 # Initialize our fast ensemble strategy
@@ -991,7 +1032,6 @@ class VLLMReportParser:
                     self.logger.debug(f"Now processing patient: {item['patient']}")
                     if self.prompt_method == "PromptGraph":
                         thread_id = uuid.uuid4()
-                        config = {"configurable": {"thread_id": thread_id}}
                         result = await asyncio.wait_for(self.chat_chain.ainvoke(item, config={"configurable": {"thread_id": thread_id}}), timeout=self.timeout)
                         result = result["result"]
                     else:
@@ -1255,6 +1295,12 @@ class VLLMReportParser:
             {"report": r, "patient": p, "index": i}
             for i, (r, p) in enumerate(zip(reports, patients))
         ]
+
+        if self.dry_run:
+            self.logger.info(f"[Dry Run] Normally would process {len(inputs)} reports, now will show you one random examples")
+            examples = random.sample(inputs, min(1, len(inputs)))
+            await self._process_items(examples)
+            return [{}] * len(inputs)
 
         results = await self._process_items(inputs)
 
