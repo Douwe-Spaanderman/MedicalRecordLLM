@@ -164,8 +164,8 @@ def plot_metric_summary(
     combined_results = pd.concat(processed_dfs)
     
     # Separate metric types
-    avg_df = combined_results[combined_results["metric_type"] == "macro_avgs"]
-    acc_df = combined_results[combined_results["metric_type"] == "balanced_accuracy"]
+    avg_df = combined_results[combined_results["metric_type"] == "micro_avgs"]
+    acc_df = combined_results[combined_results["metric_type"] == "accuracy"]
     sim_df = combined_results[combined_results["metric_type"].str.contains("similarity")]
     num_avg = len(avg_df["field"].unique())
     num_acc = len(acc_df["field"].unique())
@@ -183,17 +183,17 @@ def plot_metric_summary(
     plt.subplots_adjust(left=0.1, right=0.9, top=0.9, bottom=0.2)
     gs = fig.add_gridspec(1, 3, width_ratios=widths, wspace=0.15)  # Increased wspace
 
-    # --- ax0: Macro-average ---
+    # --- ax0: Micro-average ---
     ax0 = fig.add_subplot(gs[0])
-    plot_barplot(data=avg_df, x="field", y="score", hue="source", ylabel="Macro-Average Score", ci_lower="ci_low", ci_upper="ci_high", ax=ax0, wraptext=True, legend=False)
+    plot_barplot(data=avg_df, x="field", y="mean", hue="source", ylabel="Micro-Average Score", ci_lower="ci_low", ci_upper="ci_high", ax=ax0, wraptext=True, legend=False)
 
-    # --- ax1: Balanced accuracy ---
+    # --- ax1: Accuracy ---
     ax1 = fig.add_subplot(gs[1], sharey=ax0)
-    plot_barplot(data=acc_df, x="field", y="score", hue="source", ylabel="Balanced Accuracy", ci_lower="ci_low", ci_upper="ci_high", ax=ax1, wraptext=True, legend=False)
+    plot_barplot(data=acc_df, x="field", y="mean", hue="source", ylabel="Accuracy", ci_lower="ci_low", ci_upper="ci_high", ax=ax1, wraptext=True, legend=False)
 
     # --- ax2: Similarity ---
     ax2 = fig.add_subplot(gs[2], sharey=ax0)
-    plot_barplot(data=sim_df, x="field", y="score", hue="source", ylabel="Semantic Similarity", ci_lower="ci_low", ci_upper="ci_high", ax=ax2, wraptext=True, legend=False)
+    plot_barplot(data=sim_df, x="field", y="mean", hue="source", ylabel="Semantic Similarity", ci_lower="ci_low", ci_upper="ci_high", ax=ax2, wraptext=True, legend=False)
 
     # Shared legend for all axes, placed above the entire figure
     handles, labels = ax1.get_legend_handles_labels()

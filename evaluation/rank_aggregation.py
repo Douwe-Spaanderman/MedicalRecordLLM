@@ -88,7 +88,7 @@ def rank(LLM_outputs:List[Path], output_file:bool = None, method:str = "borda"):
         # Read and concatenate all CSV files
         df = pd.read_csv(output)
         df["source"] = output.with_suffix('').stem  # Add a column to identify the source file
-        df = df[df["metric_type"] != "macro_avgs"]  # Exclude the "All fields" row
+        df = df[df["metric_type"] != "micro_avgs"]  # Exclude the "All fields" row
         results.append(df)
 
     results = pd.concat(results, ignore_index=True)
@@ -99,18 +99,18 @@ def rank(LLM_outputs:List[Path], output_file:bool = None, method:str = "borda"):
         field_results = results[results["field"] == field]
         if method == "borda":
             # Borda count method
-            field_results['rank'] = field_results['score'].rank(ascending=False, method='min')
+            field_results['rank'] = field_results['mean'].rank(ascending=False, method='min')
             ranks[field] = field_results[['source', 'rank']].set_index('source').to_dict()['rank']
         elif method == "kemeny":
             # Kemedy-Young method
-            vote = list(field_results.sort_values("score", ascending=False)["source"])
+            vote = list(field_results.sort_values("mean", ascending=False)["source"])
             final_order = kemeny_young_aggregation([vote])
             rank_map = {source: i + 1 for i, source in enumerate(final_order)}
             field_results["rank"] = field_results["source"].map(rank_map)
             ranks[field] = field_results[["source", "rank"]].set_index('source').to_dict()['rank']
         elif method == "ranked_pairs":
             # Ranked Pairs method
-            vote = list(field_results.sort_values("score", ascending=False)["source"])
+            vote = list(field_results.sort_values("mean", ascending=False)["source"])
             final_order = ranked_pairs_aggregation([vote])
             rank_map = {source: i + 1 for i, source in enumerate(final_order)}
             field_results["rank"] = field_results["source"].map(rank_map)
