@@ -2,6 +2,7 @@ import subprocess
 import argparse
 import json
 import os
+import shlex
 import yaml
 import logging
 import requests
@@ -63,6 +64,13 @@ class ExperimentRunner:
         self.ranked_results = {}
         self.logger = logging.getLogger(__name__)
         self.load_overrides()
+
+    def log_command(self, command, stage="execution"):
+        """Logs the command in both list and shell-executable formats."""
+        formatted_cmd = shlex.join([str(arg) for arg in command])
+        
+        self.logger.debug(f"[Command] Raw list: {command}")
+        self.logger.info(f"[Command] {stage} command: {formatted_cmd}") 
 
     def load_overrides(self):
         """
@@ -163,7 +171,7 @@ class ExperimentRunner:
             subprocess.Popen: Process handle for the vLLM server.
         """
         if not model_config.get("model", False):
-            self.logger.info(f"No model name found in {model_config}. Skipping vLLM server start.")
+            self.logger.info(f"[Starting vLLM] No model name found in {model_config}. Skipping vLLM server start.")
             return None
         
         command = [
@@ -179,6 +187,7 @@ class ExperimentRunner:
             self.logger.info("[Dry Run] Starting vLLM server with command: " + " ".join(command))
             return None
         
+        self.log_command(command)
         self.logger.info(f"[Starting vLLM] {model_config['model']}")
         return subprocess.Popen(command)
 
@@ -211,7 +220,7 @@ class ExperimentRunner:
                 pass
             time.sleep(interval)
 
-        raise TimeoutError("vLLM server did not become ready within timeout.")
+        raise TimeoutError("[Waiting] vLLM server did not become ready within timeout.")
 
     def kill_vllm_server(self, process):
         """
@@ -265,6 +274,7 @@ class ExperimentRunner:
             return
 
         try:
+            self.log_command(command)
             subprocess.run(command, check=True)
             self.logger.info(f"[Success] Experiment completed for {prompt_method} + {model_name}")
             self.logger.info(f"[Output] Results saved to {output_file}")
@@ -272,12 +282,18 @@ class ExperimentRunner:
             self.logger.error(f"[Error] Failed to run experiment for {prompt_method} + {model_name}")
             self.logger.error(e)
             return
+        except Exception as e:
+            self.logger.error(f"[Unexpected Error] {str(e)}")
+            return
 
         try:
             self.run_single_calculation(output_file, prompt_method, model_name)
         except Exception as e:
             self.logger.error(f"[Error] Performance calculation failed for {output_file}")
             self.logger.error(e)
+            return
+        except Exception as e:
+            self.logger.error(f"[Unexpected Error] {str(e)}")
             return
 
     def run_single_calculation(self, llm_output_path: Path, prompt_method: str, model_name: str):
@@ -303,12 +319,15 @@ class ExperimentRunner:
             return
 
         try:
+            self.log_command(command)
             subprocess.run(command, check=True)
             self.logger.info(f"[Calculated] Performance for {llm_output_path}")
             self.performance_files[model_name].append((prompt_method, perf_output_path))
         except subprocess.CalledProcessError as e:
             self.logger.error(f"[Error] Failed to calculate performance for {llm_output_path}")
             self.logger.error(e)
+        except Exception as e:
+            self.logger.error(f"[Unexpected Error] {str(e)}")
 
     def run_visualization(self):
         """
@@ -322,10 +341,10 @@ class ExperimentRunner:
            return
 
         if not self.performance_files:
-            self.logger.info("No performance files found to visualize.")
+            self.logger.info("[Visualize] No performance files found to visualize.")
             return
         
-        self.logger.info("Starting visualization of performance results...")
+        self.logger.info("[Visualize] Starting visualization of performance results...")
 
         # Per-model comparison of prompt methods
         for model_name, method_files in self.performance_files.items():
@@ -361,11 +380,14 @@ class ExperimentRunner:
             return
 
         try:
+            self.log_command(command)
             subprocess.run(command, check=True)
-            self.logger.info(f"[Visualized] {output_file}")
+            self.logger.info(f"[Visualize] {output_file}")
         except subprocess.CalledProcessError as e:
             self.logger.error(f"[Error] Failed to visualize performance results for {output_file}")
             self.logger.error(e)
+        except Exception as e:
+            self.logger.error(f"[Unexpected Error] {str(e)}")
 
     def run_ranking(self):
         """
@@ -378,10 +400,10 @@ class ExperimentRunner:
            return
 
         if not self.performance_files:
-            self.logger.info("No performance files found to rank.")
+            self.logger.info("[Ranking] No performance files found to rank.")
             return
         
-        self.logger.info("Starting rank aggregation of performance results...")
+        self.logger.info("[Ranking] Starting rank aggregation of performance results...")
 
         # Per-model comparison of prompt methods
         for model_name, method_files in self.performance_files.items():
@@ -389,7 +411,7 @@ class ExperimentRunner:
             out_file = self.output_dir / model_name / "ranked_results.csv"
             self.rank(files, model_name, out_file, method="kemeny")
 
-        self.logger.info("Rank aggregation completed.")
+        self.logger.info("[Ranking] Rank aggregation completed.")
 
     def rank(self, input_files: List[str], model_name: str, output_file: Optional[Path] = None, method: str = "kemeny"):
         """
@@ -415,12 +437,15 @@ class ExperimentRunner:
             return
 
         try:
+            self.log_command(command)
             subprocess.run(command, check=True)
-            self.logger.info(f"[Ranked] Results saved to {output_file}")
+            self.logger.info(f"[Ranking] Results saved to {output_file}")
             self.ranked_results[model_name] = str(output_file)
         except subprocess.CalledProcessError as e:
             self.logger.error(f"[Error] Failed to run rank aggregation for {input_files}")
             self.logger.error(e)
+        except Exception as e:
+            self.logger.error(f"[Unexpected Error] {str(e)}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run all LLM experiments.")
