@@ -9,9 +9,8 @@ import uuid
 import random
 import numpy as np
 from tqdm.asyncio import tqdm_asyncio
-from collections import Counter
+from collections import Counter, OrderedDict, deque, defaultdict
 from adapters.base_adapter import BaseAdapter
-from collections import OrderedDict
 from sentence_transformers import util
 from langchain_openai import ChatOpenAI
 from langchain_core.runnables import Runnable, RunnableLambda, RunnableParallel
@@ -102,14 +101,18 @@ class ReasoningAndDynamicJSONParser(BaseOutputParser):
 
 class DummyLLM(Runnable):
     """A dummy LLM that returns predictable outputs for dry run testing."""
-    def __init__(self, response: str = "[DRY RUN] This is a mock response"):
+    def __init__(self, response: str = "[DRY RUN] This is a mock response", max_content_chars=100):
         self.response = response
+        self.max_content_chars = max_content_chars
+        self.max_content_chars_one_side = int(max_content_chars / 2)
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
 
     def _return(self, message: ChatPromptValue) -> AIMessage:
         message = "\n".join(
-            f"[{m.type.upper()}] - [{m.name.replace('_', ' ').upper()}]\n{m.content}" for m in message.to_messages()
+            f"[{m.type.upper()}] - [{m.name.replace('_', ' ').upper()}]\n"
+            f"{(m.content[:self.max_content_chars_one_side] + ' ... ' + m.content[-self.max_content_chars_one_side:]) if len(m.content) > self.max_content_chars else m.content}"
+            for m in message.to_messages()
         )
         self.logger.info(
             "\n=== [Dry run] Prompt Messages ===" + "\n" + message + "\n" + "================================="
@@ -253,7 +256,7 @@ class VLLMReportParser:
         # Load prompt configuration and method
         self.prompt_config = prompt_config
         self.prompt_method = prompt_method
-        self.chains = self._detect_chains() if prompt_method == "PromptGraph" else None
+        self.graph = self._detect_graph() if prompt_method == "PromptGraph" else None
 
         # Additional configurations
         self.patterns = self._load_patterns(patterns_path) if patterns_path else None
@@ -285,9 +288,12 @@ class VLLMReportParser:
         self.logger.info(f"Batch Size: {self.batch_size}")
         self.logger.info(f"Timeout: {self.timeout} seconds")
         self.logger.info(f"Max Concurrent Requests: {self.max_concurrent}")
+        if self.graph:
+            self.logger.info(f"Using the following graph sequence:")
+            self.logger.info(self.print_graph(self.graph))
 
         if self.dry_run:
-            self.llm = DummyLLM()
+            self.llm = DummyLLM(max_content_chars=10**9) if self.verbose else DummyLLM()
             self.max_concurrent, self.batch_size = 1, None # Setting this for easier debugging 
 
         # Generate the chat chains based on the prompt method
@@ -378,38 +384,234 @@ class VLLMReportParser:
         if not isinstance(example['input'], str) or not isinstance(example['output'], str):
             raise ValueError("Example input and output must be strings")
 
-    def _detect_chains(self) -> Optional[List[int]]:
+    def _detect_graph(self) -> Optional[List[int]]:
         """
-        Detect if the prompt configuration contains chains for PromptGraph method
+        Detect if the prompt configuration contains a graph structure for PromptGraph method.
+        Builds a Directed Acyclic Graph (DAG) representation of the prompt chains and dependencies.
 
         Returns:
-            List of chain indices if chains are defined, otherwise None
+            Dict[int, Dict] where each key is a chain_order and values contains:
+                - fields: list of field names to ask at this step
+                - edges: list of transitions to next steps (both unconditional and conditional)
+                - dependencies: list of fields this step depends on
         """
-        # Chains are defined in the prompt_config under 'field_instructions'
-        chains = []
-        for field in self.prompt_config['field_instructions']:
-            if chain_order := field.get('chain_order'):
-                chains.append(chain_order)
-
-        # Now check if the length of task, example, reasoning if present and output match the chain order
-        if len(chains) != len(self._parse_json(self.prompt_config.get('task', ''))):
-            raise ValueError("Chain order does not match the number of tasks defined in the YAML configuration. This will result in prompt generation errors.")
+        graph = defaultdict(lambda: {"fields": [], "edges": [], "dependencies": set()})
+        field_lookup = {f["name"]: f for f in self.prompt_config["field_instructions"]}
         
-        # Same validation of example if present
-        if 'example' in self.prompt_config:
-            example = self.prompt_config['example']
-            if reasoning := example.get('reasoning'):
-                # Parse reasoning as JSON if it exists
-                reasoning = reasoning.strip().split("\n")
-                if len(chains) != len(reasoning):
-                    raise ValueError("Chain order does not match the number of reasoning steps defined in the example. This will result in prompt generation errors.")
-            if 'output' in example and len(self._parse_json(example.get('output', ''))) != len(chains):
-                raise ValueError("Chain order does not match the number of output fields defined in the example. This will result in prompt generation errors.")
+        # First pass: collect all fields and their chain orders
+        all_steps = set()
+        for field in self.prompt_config["field_instructions"]:
+            name = field["name"]
+            chain_order = field.get("chain_order")
+            if chain_order is not None:
+                graph[chain_order]["fields"].append(name)
+                all_steps.add(chain_order)
+
+        # Validation of example if present (unchanged from original)
+        if 'examples' in self.prompt_config:
+            examples = self.prompt_config['examples']
+            for idx, example in enumerate(examples):
+                if reasoning := example.get('reasoning'):
+                    reasoning = reasoning.strip().split("\n")
+                    if len(field_lookup) != len(reasoning):
+                        raise ValueError(f"Chain order does not match the number of reasoning steps defined in example {idx}. This will result in prompt generation errors.")
+                if output := example.get('output'):
+                    output = self._parse_json(output)
+                    if len(field_lookup) != len(output):
+                        raise ValueError(f"Chain order does not match the number of output fields defined in the example {idx}. This will result in prompt generation errors.")
+
+        # Second pass: build dependencies and edges
+        for field in self.prompt_config["field_instructions"]:
+            name = field["name"]
+            chain_order = field.get("chain_order")
+            if chain_order is None:
+                continue
+
+            if dep := field.get("depends_on"):
+                dep_field = dep.get("field")
+                dep_values = dep.get("values")
+
+                if not dep_field or dep_values is None:
+                    raise ValueError(f"Invalid depends_on for '{name}'")
+
+                if not isinstance(dep_values, list):
+                    dep_values = [dep_values]
+
+                if dep_field not in field_lookup:
+                    raise ValueError(f"'{name}' depends on unknown field '{dep_field}'")
                 
-        if not chains:
-            return None
-        else:
-            return list(set(chains))  # Return unique chain orders
+                target_field = field_lookup[dep_field]
+                target_options = target_field.get("options")
+                if target_options:
+                    for v in dep_values:
+                        if v not in target_options:
+                            raise ValueError(f"Invalid depends_on values '{v}' for field '{dep_field}'")
+                else:
+                    self.logger.warning(f"Dependency for '{dep_field}' is '{target_field}', but this field is not a categorical variable.")
+            
+                target_order = target_field.get("chain_order")
+                if target_order is None:
+                    raise ValueError(f"Field '{dep_field}' has no chain_order")
+                
+                if chain_order <= target_order:
+                    raise ValueError(
+                        f"Field '{name}' (chain_order={chain_order}) must come after "
+                        f"its dependency '{dep_field}' (chain_order={target_order})"
+                    )
+                
+                # Record the dependency
+                graph[chain_order]["dependencies"].add(dep_field)
+                
+                # Add unique edges only
+                existing_conditions = {
+                    (e["condition"]["field"], e["condition"]["value"])
+                    for e in graph[target_order]["edges"]
+                    if e["condition"] is not None
+                }
+
+                for val in dep_values:
+                    if (dep_field, val) not in existing_conditions:
+                        graph[target_order]["edges"].append({
+                            "condition": {"field": dep_field, "value": val},
+                            "next_step": chain_order
+                        })
+                        existing_conditions.add((dep_field, val))
+            else:
+                # For fields with no dependencies, we'll add default edges later
+                pass
+
+        # Third pass: add unconditional edges only where needed, and else conditional edges
+        sorted_orders = sorted(graph.keys())
+        for i, node in enumerate(sorted_orders):
+            next_candidates = [n for n in sorted_orders[i+1:] if n > node and not graph[n]["dependencies"]]
+
+            if next_candidates:
+                if not graph[node]["edges"]:
+                    next_step = min(next_candidates)
+                    graph[node]["edges"].append({
+                        "condition": None,  # Unconditional
+                        "next_step": next_step
+                    })
+                else:
+                    next_step = min(next_candidates)
+                    unique_fields = list({edge.get('condition', {}).get("field") for edge in graph[node]['edges'] if edge.get('condition', {}).get("field") is not None})
+                    if unique_fields:
+                        for unique_field in unique_fields:
+                            graph[node]["edges"].append({
+                                "condition": {"field": unique_field, "value": "else"}, 
+                                "next_step": next_step
+                            })
+
+        # Validate the DAG has no cycles
+        if not self._is_dag(graph):
+            raise ValueError("The dependency graph contains cycles, which is not allowed")
+        
+        return dict(graph) if graph else None
+
+    def _is_dag(self, dag: Dict[int, Dict]) -> bool:
+        """Helper function to check if the graph is acyclic."""
+        in_degree = {node: 0 for node in dag}
+        
+        # Calculate in-degree for each node
+        for node in dag:
+            for edge in dag[node]["edges"]:
+                neighbor = edge["next_step"]
+                in_degree[neighbor] += 1
+        
+        # Kahn's algorithm for topological sorting
+        queue = deque([node for node in dag if in_degree[node] == 0])
+        count = 0
+        
+        while queue:
+            node = queue.popleft()
+            count += 1
+            
+            for edge in dag[node]["edges"]:
+                neighbor = edge["next_step"]
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+        
+        return count == len(dag)
+
+    def print_graph(self, graph: Dict[int, Dict[str, Any]]):
+        """
+        Recursively print a graph in a readable, indented format.
+        
+        Args:
+            graph
+        """
+        if not graph:
+            return "No graph structure detected"
+        
+        sorted_nodes = sorted(graph.keys())
+        lines = []
+        lines.append("\nDAG Structure:")
+        lines.append("=" * 40)
+        
+        for node in sorted_nodes:
+            node_info = graph[node]
+            lines.append(f"Step {node}:")
+            lines.append(f"  Fields: {', '.join(node_info['fields'])}")
+            
+            if node_info['dependencies']:
+                lines.append(f"  Depends on: {', '.join(node_info['dependencies'])}")
+            
+            if node_info['edges']:
+                lines.append("  Edges:")
+                for edge in node_info['edges']:
+                    if edge['condition']:
+                        if edge['condition']['value'] == "else":
+                            cond = f"if {edge['condition']['field']} is anything else"
+                        else:
+                            cond = f"if {edge['condition']['field']} == {edge['condition']['value']}"
+                    else:
+                        cond = "always"
+                    lines.append(f"    -> Step {edge['next_step']} ({cond})")
+            else:
+                lines.append("  No outgoing edges (end node)")
+            
+            lines.append("-" * 40)
+        
+        # Add topological sort information
+        try:
+            topo_order = self._topological_sort(graph)
+            lines.append("\nTopological Order: " + " → ".join(map(str, topo_order)))
+        except ValueError as e:
+            lines.append(f"\nWarning: {str(e)}")
+        
+        return "\n".join(lines)
+
+    def _topological_sort(self, graph: Dict[int, Dict]) -> List[int]:
+        """Helper to get topological order of nodes (useful for execution order)."""
+        in_degree = {node: 0 for node in graph}
+        
+        # Calculate in-degree for each node
+        for node in graph:
+            for edge in graph[node]['edges']:
+                in_degree[edge['next_step']] += 1
+        
+        # Kahn's algorithm
+        queue = deque([node for node in graph if in_degree[node] == 0])
+        topo_order = []
+        
+        while queue:
+            if len(queue) > 1:
+                # This indicates multiple possible valid orders
+                pass
+            node = queue.popleft()
+            topo_order.append(node)
+            
+            for edge in graph[node]['edges']:
+                neighbor = edge['next_step']
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+        
+        if len(topo_order) != len(graph):
+            raise ValueError("Graph contains cycles - no valid topological order")
+        
+        return topo_order
 
     def _format_field_instruction(self, field: Dict[str, str], index: int, chain: Optional[int] = None, output_format: Dict[str, str] = {}) -> Tuple[str, dict]:
         """Convert YAML field config into numbered instruction format
@@ -432,7 +634,36 @@ class VLLMReportParser:
         # Add type
         instruction.append(f'   - Type: {field["type"]}')
         output_format[field['name']]['type'] = field['type']
-        
+
+        # Add depends on if present and chain is not defined
+        if chain is not None and 'depends_on' in field and self.prompt_method != "PromptGraph":
+            depends_on = field["depends_on"]
+            if "field" not in depends_on:
+                self.logger.warning()
+                pass # Skip depends on
+
+            field_depends_on = depends_on["field"]
+            if "values" in depends_on:
+                values_depends_on = depends_on["field"]
+                if isinstance(values_depends_on, list):
+                    if len(values_depends_on) == 1:
+                        values_depends_on = depends_on["field"][0]
+                        annotation_hint = "is value"
+                    else:
+                        values_depends_on = ", ".join(depends_on["field"][:-1]) + f", or {depends_on['field'][-1]}"
+                        annotation_hint = "is one of these values"
+                else:
+                    values_depends_on = depends_on["field"]
+                    annotation_hint = "is value"
+            elif "value" in depends_on:
+                values_depends_on = depends_on["field"]
+                annotation_hint = "is value"
+            else:
+                self.logger.warning()
+                pass # Skip depends on
+
+            instruction.append(f'   - Depends on: This fields is only applicable if field: {field_depends_on}, {annotation_hint}: {values_depends_on}. Otherwise use default for this field!')
+
         # Add constraints if present
         if 'constraints' in field:
             constraints = field['constraints']
@@ -739,13 +970,14 @@ class VLLMReportParser:
         """
         self.logger.info(f"Stating generating prompt using {self.prompt_method} method")
         if self.prompt_method == "PromptGraph":
-            if self.chains is None:
+            if self.graph is None:
                 raise ValueError("PromptGraph method requires chain definitions in the prompt configuration")
             
             # Generate prompts for each chain
             prompt_templates = []
+            output_formats = {}
             parsers = []
-            for chain in self.chains:
+            for chain in self.graph:
                 system_instructions, field_instructions, task_instructions, examples_instructions, report_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt(chain=chain)
                 prompt = [
                     SystemMessage(system_instructions, name="system_instructions") if self.system_instructions_allowed else HumanMessage(system_instructions, name="system_instructions"),
@@ -780,9 +1012,12 @@ class VLLMReportParser:
                 prompt_template = prompt_template.pipe(self.add_names_to_messages)
 
                 prompt_templates.append(prompt_template)
+                output_formats.update(output_format)
                 parsers.append(ReasoningAndDynamicJSONParser(output_format, dry_run=self.dry_run))
             
-            self.chat_chain = self._create_prompt_chain_graph(prompt_templates, parsers)
+            # Bit ugly, but saving the to the final output model manually and using after invoke to structure data
+            self.final_parser = ReasoningAndDynamicJSONParser(output_formats, dry_run=self.dry_run)._output_model
+            self.chat_chain = self._create_prompt_graph(prompt_templates, parsers)
         else:
             system_instructions, field_instructions, task_instructions, examples_instructions, report_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt(chain=None)
             prompt = [
@@ -883,16 +1118,16 @@ class VLLMReportParser:
 
         return merged
 
-    def _create_prompt_chain_graph(self, prompt_templates: List[ChatPromptTemplate], parsers: List[ReasoningAndDynamicJSONParser]) -> Runnable:
+    def _create_prompt_graph(self, prompt_templates: List[ChatPromptTemplate], parsers: List[ReasoningAndDynamicJSONParser]) -> Runnable:
         """
-        Create a LangGraph with memory from the prompt templates
-        for prompt chaining
+        Create a LangGraph from the DAG structure that can handle conditional branching for PromptGraph
         
         Args:
-            prompt_templates: List of ChatPromptTemplate objects
+            prompt_templates: List of ChatPromptTemplate objects ordered by chain_order
+            parsers: List of parsers corresponding to each prompt template
             
         Returns:
-            Runnable graph with memory
+            Runnable graph with memory that follows the DAG structure
         """
         # Import langgraph here so optional dependency only required when using graphs
         from langgraph.graph import MessagesState, StateGraph, START, END
@@ -905,57 +1140,159 @@ class VLLMReportParser:
             result: Dict[str, Any]
             messages: List[BaseMessage]
             status: str
+            current_values: Dict[str, Any]
 
         # Initialize the graph and memory
         workflow = StateGraph(state_schema=PromptGraphState)
         memory = InMemorySaver()
 
-        for idx, (prompt_template, parser) in enumerate(zip(prompt_templates, parsers)):
-            node_name = f"chain_{idx}"
-            def create_node(prompt_template: ChatPromptTemplate, parser: ReasoningAndDynamicJSONParser, chain_idx: int):
+        earliest_chain_order = min(self.graph.keys())
+        last_item_used = False
+        for chain_order, node_data in sorted(self.graph.items()):
+            prompt_idx = chain_order - earliest_chain_order # If you start from 1, 2, etc. instead of 0
+            if prompt_idx > len(prompt_templates):
+                if last_item_used:
+                    raise ValueError("Multiple chains out of range detected, this is not possible, please fix the order of the chains")
+                else:
+                    prompt_idx = len(prompt_templates) - 1
+                    last_item_used = True
+
+            prompt_template = prompt_templates[prompt_idx]
+            parser = parsers[prompt_idx]
+            
+            def create_node(prompt_template: ChatPromptTemplate, 
+                        parser: ReasoningAndDynamicJSONParser,
+                        step: int,
+                        fields: List[str]):
                 @backoff.on_exception(backoff.expo, Exception, max_tries=3, jitter=backoff.full_jitter)
                 async def node(state: PromptGraphState) -> Dict[str, Any]:
                     try:
+                        # Run the chain
                         chain = prompt_template | self.llm | parser
-                        result = await chain.ainvoke({"report": state["report"], "patient": state["patient"]}, timeout=self.timeout)
+                        result = await chain.ainvoke(
+                            {"report": state["report"], "patient": state["patient"]}, 
+                            timeout=self.timeout
+                        )
 
-                        if result.get('extracted_data', None) == None:
-                            raise ValueError(f"Failed to parse JSON block or no valid JSON found for Chain {chain_idx}.")
+                        if result.get('extracted_data', None) is None:
+                            raise ValueError(f"Failed to parse JSON block for Step {step}")
 
+                        # Update state with new values
+                        new_values = {**state.get("current_values", {}), **result["extracted_data"]}
+                        
                         return {
-                            "patient": state.get("patient"),
-                            "index": state.get("index"),
+                            "patient": state["patient"],
+                            "index": state["index"],
                             "result": {
                                 "reasoning": state.get("result", {}).get("reasoning", []) + [result["reasoning"]],
                                 "extracted_data": {**state.get("result", {}).get("extracted_data", {}), **result["extracted_data"]}
                             },
-                            "messages": state.get("messages", []) + [AIMessage(content=result.get("raw_output"))],
-                            "status": "succes"
+                            "messages": state.get("messages", []) + [AIMessage(content=result["raw_output"])],
+                            "status": "success",
+                            "current_values": new_values
                         }
                     except asyncio.TimeoutError:
-                        self.logger.warning(f"Timeout for Patient: {state.get('patient')}, Index: {state.get('index')}, Chain Index: {chain_idx}")
+                        self.logger.warning(f"Timeout for Patient: {state['patient']}, Step: {step}")
                         raise
                     except Exception as e:
-                        self.logger.error(f"Failed — Patient: {state.get('patient')}, Index: {state.get('index')}, Chain Index: {chain_idx}, Error: {e}")
+                        self.logger.error(f"Failed - Patient: {state['patient']}, Step: {step}, Error: {e}")
                         raise
 
                 return node
 
-            workflow.add_node(node_name, create_node(prompt_template=prompt_template, parser=parser, chain_idx=idx))
+            node_name = f"step_{chain_order}"
+            workflow.add_node(
+                node_name,
+                create_node(
+                    prompt_template=prompt_template,
+                    parser=parser,
+                    step=chain_order,
+                    fields=node_data["fields"]
+                )
+            )
+
+        # Add conditional edges based on DAG structure
+        for chain_order, node_data in self.graph.items():
+            current_node = f"step_{chain_order}"
+            edges = node_data["edges"]
+
+            if not node_data["edges"]:
+                # Terminal node
+                workflow.add_edge(current_node, END)
+                continue
+        
+            # Separate conditional and unconditional edges
+            conditional_edges = [e for e in edges if e["condition"] is not None]
+            unconditional_edges = [e for e in edges if e["condition"] is None]
+
+            if not conditional_edges:
+                # Only unconditional edges - simple case
+                for edge in unconditional_edges:
+                    workflow.add_edge(current_node, f"step_{edge['next_step']}")
+                continue
+
+            # Create condition function
+            def create_condition_func(conditions, has_else):
+                def condition(state: PromptGraphState) -> str:
+                    # First check all non-else conditions
+                    for edge in conditions:
+                        if edge["condition"]["value"] == "else":
+                            continue
+                            
+                        field = edge["condition"]["field"]
+                        value = edge["condition"]["value"]
+                        if str(state.get("current_values", {}).get(field)) == str(value):
+                            return f"cond_{field}={value}"
+                    
+                    # Explicitly check for else condition if it exists
+                    if has_else:
+                        return "else_condition"
+                    
+                    # Fallback to unconditional edges if they exist
+                    if unconditional_edges:
+                        return f"unconditional"
+                        
+                    # Final fallback
+                    return "default"
+                return condition
+
+            # Check if we have explicit else conditions
+            has_else = any(e["condition"]["value"] == "else" for e in conditional_edges)
             
-            if idx == 0:
-                workflow.add_edge(START, node_name)
-            elif idx > 0:
-                workflow.add_edge(f"chain_{idx-1}", node_name)
+            # Build path map
+            path_map = {}
+            for edge in conditional_edges:
+                if edge["condition"]["value"] == "else":
+                    path_map["else_condition"] = f"step_{edge['next_step']}"
+                else:
+                    path_map[f"cond_{edge['condition']['field']}={edge['condition']['value']}"] = f"step_{edge['next_step']}"
+            
+            # Add unconditional path if exists
+            if unconditional_edges:
+                path_map["unconditional"] = f"step_{unconditional_edges[0]['next_step']}"
+            
+            # Only add default if no other options exist
+            if not has_else and not unconditional_edges:
+                path_map["default"] = END
 
-        workflow.add_edge(f"chain_{len(prompt_templates)-1}", END)
+            workflow.add_conditional_edges(
+                current_node,
+                create_condition_func(conditional_edges, has_else),
+                path_map
+            )
 
+        # Set entry point
+        workflow.set_entry_point(f"step_{min(self.graph.keys())}")
+        
+        # Compile the graph
         graph = workflow.compile(checkpointer=memory)
 
         if self.verbose:
-            from IPython.display import Image
-            with open("graph_output.png", "wb") as f:
-                f.write(graph.get_graph().draw_mermaid_png())
+            try:
+                with open("dag_graph.png", "wb") as f:
+                    f.write(graph.get_graph().draw_mermaid_png())
+            except Exception as e:
+                self.logger.warning(f"Could not generate graph visualization: {e}")
 
         return graph
 
@@ -1053,6 +1390,7 @@ class VLLMReportParser:
                     if self.prompt_method == "PromptGraph":
                         thread_id = uuid.uuid4()
                         result = await asyncio.wait_for(self.chat_chain.ainvoke(item, config={"configurable": {"thread_id": thread_id}}), timeout=self.timeout)
+                        result["result"]["extracted_data"] = self.final_parser(**result["result"]["extracted_data"]).dict()
                         result = result["result"]
                     else:
                         result = await asyncio.wait_for(self.chat_chain.ainvoke(item), timeout=self.timeout)
