@@ -109,7 +109,7 @@ class DummyLLM(Runnable):
 
     def _return(self, message: ChatPromptValue) -> AIMessage:
         message = "\n".join(
-            f"[{m.type.upper()}]\n{m.content}" for m in message.to_messages()
+            f"[{m.type.upper()}] - [{m.name.replace('_', ' ').upper()}]\n{m.content}" for m in message.to_messages()
         )
         self.logger.info(
             "\n=== [Dry run] Prompt Messages ===" + "\n" + message + "\n" + "================================="
@@ -718,6 +718,18 @@ class VLLMReportParser:
             )
         return system_instructions, field_instructions, task_instructions, examples_instructions, report_instructions, final_instructions, prompt_variables, output_format
 
+    def add_names_to_messages(self, prompt_value: ChatPromptValue) -> ChatPromptValue:
+        processed_messages = []
+        for msg in prompt_value.messages:
+            if hasattr(msg, 'additional_kwargs') and 'name' in msg.additional_kwargs:
+                # Create a new message instance with the name at top level
+                new_msg = msg.copy()
+                new_msg.name = new_msg.additional_kwargs.pop('name')
+                processed_messages.append(new_msg)
+            else:
+                processed_messages.append(msg)
+        return ChatPromptValue(messages=processed_messages)
+
     def _generate_chat_chain(self) -> None:
         """
         Generate the chat chain based on the prompt method and configuration
@@ -738,7 +750,7 @@ class VLLMReportParser:
                 prompt = [
                     SystemMessage(system_instructions, name="system_instructions") if self.system_instructions_allowed else HumanMessage(system_instructions, name="system_instructions"),
                     HumanMessage(field_instructions, name="field_instructions"),
-                    HumanMessage(task_instructions, name="task_instructions"),
+                    HumanMessagePromptTemplate.from_template(task_instructions, additional_kwargs={"name": "task_instructions"}),
                 ]
 
                 if examples_instructions:
@@ -755,16 +767,17 @@ class VLLMReportParser:
                                 AIMessage(example_instructions["assistant_reasoning"], name=f"example_assistant_reasoning_{idx}"),
                             ])
                         prompt.extend([
-                            AIMessagePromptTemplate.from_template(example_instructions["assistant_output"], name=f"example_assistant_output_{idx}")
+                            AIMessagePromptTemplate.from_template(example_instructions["assistant_output"], additional_kwargs={"name": f"example_assistant_output_{idx}"})
                         ])
 
                 prompt.extend([
-                    HumanMessagePromptTemplate.from_template(report_instructions, name="report_instructions"),
+                    HumanMessagePromptTemplate.from_template(report_instructions, additional_kwargs={"name": "report_instructions"}),
                     HumanMessage(final_instructions, name="final_instructions")
                 ])
                 prompt = self._merge_consecutive_messages(prompt) if self.merge_consecutive_messages else prompt
                 prompt_template = ChatPromptTemplate(prompt)
                 prompt_template = prompt_template.partial(**prompt_variables)
+                prompt_template = prompt_template.pipe(self.add_names_to_messages)
 
                 prompt_templates.append(prompt_template)
                 parsers.append(ReasoningAndDynamicJSONParser(output_format, dry_run=self.dry_run))
@@ -775,7 +788,7 @@ class VLLMReportParser:
             prompt = [
                 SystemMessage(system_instructions) if self.system_instructions_allowed else HumanMessage(system_instructions, name="system_instructions"),
                 HumanMessage(field_instructions, name="field_instructions"),
-                HumanMessagePromptTemplate.from_template(task_instructions, name="task_instructions"),
+                HumanMessagePromptTemplate.from_template(task_instructions, additional_kwargs={"name": "task_instructions"}),
             ]
 
             if examples_instructions:
@@ -792,17 +805,18 @@ class VLLMReportParser:
                             AIMessage(example_instructions["assistant_reasoning"], name=f"example_assistant_reasoning_{idx}"),
                         ])
                     prompt.extend([
-                        AIMessagePromptTemplate.from_template(example_instructions["assistant_output"], name=f"example_assistant_output_{idx}")
+                        AIMessagePromptTemplate.from_template(example_instructions["assistant_output"], additional_kwargs={"name": f"example_assistant_output_{idx}"})
                     ])
 
             prompt.extend([
-                HumanMessagePromptTemplate.from_template(report_instructions, name="report_instructions"),
+                HumanMessagePromptTemplate.from_template(report_instructions, additional_kwargs={"name": "report_instructions"}),
                 HumanMessage(final_instructions, name="final_instructions")
             ])
             prompt = self._merge_consecutive_messages(prompt) if self.merge_consecutive_messages else prompt
 
             prompt_template = ChatPromptTemplate(prompt)
             prompt_template = prompt_template.partial(**prompt_variables)
+            prompt_template = prompt_template.pipe(self.add_names_to_messages)
 
             parser = ReasoningAndDynamicJSONParser(output_format, dry_run=self.dry_run)
             base_chain = prompt_template | self.llm | parser
@@ -828,38 +842,44 @@ class VLLMReportParser:
         
         def to_template_message(msg: Union[HumanMessage, SystemMessage, AIMessage]) -> BasePromptTemplate:
             if isinstance(msg, HumanMessage):
-                return HumanMessagePromptTemplate.from_template(msg.content, name=msg.name)
+                return HumanMessagePromptTemplate.from_template(msg.content, additional_kwargs={"name": getattr(msg, "name", None)})
             elif isinstance(msg, SystemMessage):
-                return SystemMessagePromptTemplate.from_template(msg.content, name=msg.name)
+                return SystemMessagePromptTemplate.from_template(msg.content, additional_kwargs={"name": getattr(msg, "name", None)})
             elif isinstance(msg, AIMessage):
-                return AIMessagePromptTemplate.from_template(msg.content, name=msg.name)
+                return AIMessagePromptTemplate.from_template(msg.content, additional_kwargs={"name": getattr(msg, "name", None)})
             else:
                 raise ValueError(f"Unsupported message type: {type(msg)}")
     
-        def _create_message(cls: BasePromptTemplate, merged_template: str) -> BasePromptTemplate:
+        def _create_message(cls: BasePromptTemplate, merged_template: str, names: List[str]) -> BasePromptTemplate:
+            combined_name = " + ".join(filter(None, names)) if names else None
             prompt = PromptTemplate.from_template(merged_template)
-            return cls(prompt=prompt)
+            return cls(prompt=prompt, additional_kwargs={"name": combined_name} if combined_name else {})
         
         merged = []
         prev_cls = None
-        buffer = []
+        name_buffer = []
+        content_buffer = []
 
         for msg in messages:
             if "PromptTemplate" not in type(msg).__name__:
                 msg = to_template_message(msg)
 
             curr_cls = type(msg)
+            curr_name = getattr(msg, "name", None) or msg.additional_kwargs.get("name")
 
             if curr_cls == prev_cls:
-                buffer.append(msg.prompt.template)
+                content_buffer.append(msg.prompt.template)
+                if curr_name:
+                    name_buffer.append(curr_name)
             else:
                 if prev_cls is not None:
-                    merged.append(_create_message(prev_cls, "\n\n".join(buffer)))
+                    merged.append(_create_message(prev_cls, "\n\n".join(content_buffer), name_buffer))
                 prev_cls = curr_cls
-                buffer = [msg.prompt.template]
+                content_buffer = [msg.prompt.template]
+                name_buffer = [curr_name] if curr_name else []
 
-        if buffer:
-            merged.append(_create_message(prev_cls, "\n\n".join(buffer)))
+        if content_buffer:
+            merged.append(_create_message(prev_cls, "\n\n".join(content_buffer), name_buffer))
 
         return merged
 
