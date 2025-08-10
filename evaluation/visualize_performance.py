@@ -241,8 +241,8 @@ def plot_metric_summary(
         axes.append(ax0)
 
     # --- ax1: Accuracy ---
-    ax1 = safe_plot(1, acc_df, named_map.get(avg_df["metric_type"].unique()[0], "") 
-                if len(avg_df["metric_type"].unique()) == 1 
+    ax1 = safe_plot(1, acc_df, named_map.get(acc_df["metric_type"].unique()[0], "") 
+                if len(acc_df["metric_type"].unique()) == 1 
                 else "(Balanced) Accuracy", sharey=ax0 if ax0 else None)
     if ax1:
         axes.append(ax1)
