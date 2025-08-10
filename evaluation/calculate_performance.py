@@ -4,7 +4,11 @@ from typing import Dict, Any, Union, Optional, List
 import ast
 import yaml
 from scipy.stats import t
+from sklearn.metrics import balanced_accuracy_score
 from sentence_transformers import SentenceTransformer, util
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.metrics._classification")
 
 def safe_literal_eval(val: Union[str, None]) -> Union[None, List[Any]]:
     """
@@ -95,7 +99,8 @@ def calculate_results(
     prompt_config: Dict[str, Any], 
     sentence_model: SentenceTransformer, 
     weights: Optional[List[int]] = None,
-    n_bootstrap: int = 1000
+    n_bootstrap: int = 1000,
+    use_balanced_accuracy: bool = False
 ) -> pd.DataFrame:    
     """
     Calculate performance metrics comparing prediction against ground truth.
@@ -105,26 +110,27 @@ def calculate_results(
         ground_truth (pd.DataFrame): DataFrame containing ground truth values.
         prompt_config (Dict[str, Any]): Configuration dictionary defining fields and their types.
         sentence_model (SentenceTransformer): Pretrained sentence transformer model for semantic similarity.
-        weights (Optional[List[int]]): Weights for each field used for micro averaging. This overrides the weights defined in the prompt config.
-        n_bootstrap (int): Number of bootstrap samples for confidence interval calculation.
+        weights (Optional[List[int]]): Weights for each field used for micro averaging.
+        n_bootstrap (int): Number of bootstrap samples for CI; if <=1, skip bootstrapping.
+        use_balanced_accuracy (bool): If True, use balanced accuracy for categorical/binary fields instead of normal accuracy.
+    
     Returns:
         pd.DataFrame: DataFrame containing calculated metrics for each field plus micro average.
     """
-    # Sanity check if prediction and ground_truth have the same columns and length
+    # Sanity check
     if not prediction.columns.equals(ground_truth.columns):
         raise ValueError("Prediction and ground truth DataFrames must have the same columns.")
-    
     if len(prediction) != len(ground_truth):
         raise ValueError("Prediction and ground truth DataFrames must have the same number of rows.")
     
     results = []
-    field_weights = []
     for field, meta in prompt_config.items():
         default_value = meta.get("default", "Unknown")
         type_value = meta.get("type", "string").replace("_or_missing", "")
-        # Check for weights
+        if meta.get("options") and not type_value in {"binary", "boolean"}:
+            type_value = "categorical_number" if type_value in {"number", "float"} else "categorical"
+
         field_weight = meta.get("weight", 1) if weights is None else weights[list(prompt_config.keys()).index(field)]
-        field_weights.append(field_weight)
 
         # Clean missing values
         for df in [ground_truth, prediction]:
@@ -132,25 +138,29 @@ def calculate_results(
                 lambda x: default_value if (
                     (isinstance(x, list) and (len(x) == 0 or pd.isna(x).any()))
                     or (not isinstance(x, list) and pd.isna(x))
-                    or (isinstance(x, str) and x.strip().lower() in {"none", "not specified", "not applicable", "missing", "unknown", None})
+                    or (isinstance(x, str) and x.strip().lower() in {
+                        "none", "not specified", "not applicable", "missing", "unknown", None
+                    })
                 ) else x
             )
 
-        # Calculate metrics depending on the field type
-        if type_value in {"string", "binary", "boolean", "categorical"}:
+        scores = None
+        metric_type = None
+
+        if type_value in {"string", "binary", "boolean", "categorical", "categorical_number"}:
             if "options" in meta:
-                # Calculate the balanced accuracy for categorical fields
-                if type_value in {"binary", "boolean"}:
-                    # Ensure both prediction and ground truth are numeric
+                if type_value in {"binary", "boolean", "categorical_number"}:
                     prediction[field] = pd.to_numeric(prediction[field], errors='coerce')
                     ground_truth[field] = pd.to_numeric(ground_truth[field], errors='coerce')
-
-                    # Convert all to strings and replace NaN with sentinel
                     prediction[field] = prediction[field].fillna(default_value).astype(str)
                     ground_truth[field] = ground_truth[field].fillna(default_value).astype(str)
 
-                scores = (prediction[field] == ground_truth[field]).astype(int).to_numpy()
-                metric_type = "accuracy"
+                if use_balanced_accuracy:
+                    # Compute balanced accuracy per bootstrap later
+                    metric_type = "balanced_accuracy"
+                else:
+                    scores = (prediction[field] == ground_truth[field]).astype(int).to_numpy()
+                    metric_type = "accuracy"
             else:
                 # Semantic similarity for free text
                 scores = pd.Series([
@@ -158,19 +168,16 @@ def calculate_results(
                     for p, g in zip(prediction[field], ground_truth[field])
                 ]).to_numpy()
                 metric_type = "semantic_similarity"
+
         elif type_value in {"number", "float"}:
-            # Ensure both prediction and ground truth are numeric
             prediction[field] = pd.to_numeric(prediction[field], errors='coerce')
             ground_truth[field] = pd.to_numeric(ground_truth[field], errors='coerce')
-
-            # Convert all to strings and replace NaN with sentinel
             prediction[field] = prediction[field].fillna(default_value).astype(str)
             ground_truth[field] = ground_truth[field].fillna(default_value).astype(str)
-
             scores = (prediction[field] == ground_truth[field]).astype(int).to_numpy()
             metric_type = "accuracy"
+
         elif type_value == "list":
-            # Ensure both prediction and ground truth are lists
             prediction[field] = prediction[field].apply(lambda x: x if isinstance(x, list) else [])
             ground_truth[field] = ground_truth[field].apply(
                 lambda x: x if isinstance(x, list) else x.split(", ") if isinstance(x, str) else []
@@ -180,16 +187,39 @@ def calculate_results(
                 for p, g in zip(prediction[field], ground_truth[field])
             ]).to_numpy()
             metric_type = "list_similarity"
-        elif type_value in {"dictionary", "dict"}:
-            raise NotImplementedError("Dictionary type fields are not supported yet.")
+
         else:
             raise ValueError(f"Unsupported field type for field '{field}': {meta.get('type')}")
-        
-        # Calculate 95% confidence interval
-        n = len(scores)
-        mean_score = scores.mean()
-        std_err = scores.std(ddof=1) / np.sqrt(n)
-        ci = t.interval(0.95, df=n-1, loc=mean_score, scale=std_err)
+
+        # Bootstrapping for CI
+        if n_bootstrap > 1:
+            rng = np.random.default_rng()
+            boot_means = []
+            if use_balanced_accuracy and metric_type == "balanced_accuracy":
+                # True balanced accuracy bootstrap
+                gt_arr = np.array(ground_truth[field])
+                pred_arr = np.array(prediction[field])
+                for _ in range(n_bootstrap):
+                    idx = rng.integers(0, len(gt_arr), len(gt_arr))
+                    try:
+                        ba = balanced_accuracy_score(gt_arr[idx], pred_arr[idx])
+                        boot_means.append(ba)
+                    except ValueError:
+                        pass  # occurs if bootstrap sample has one class only
+            else:
+                for _ in range(n_bootstrap):
+                    idx = rng.integers(0, len(scores), len(scores))
+                    boot_means.append(np.nanmean(scores[idx]))
+            mean_score = np.nanmean(boot_means) if boot_means else np.nan
+            ci = (np.nanpercentile(boot_means, 2.5), np.nanpercentile(boot_means, 97.5)) if boot_means else (np.nan, np.nan)
+        else:
+            if use_balanced_accuracy and metric_type == "balanced_accuracy":
+                raise ValueError("Impossible to provide use balanced accuracy without bootstrapping.")
+            else:
+                n = np.isfinite(scores).sum()
+                mean_score = np.nanmean(scores)
+                std_err = np.nanstd(scores, ddof=1) / np.sqrt(n) if n > 1 else 0
+                ci = t.interval(0.95, df=n-1, loc=mean_score, scale=std_err) if n > 1 else (mean_score, mean_score)
 
         results.append({
             "field": field,
@@ -198,37 +228,84 @@ def calculate_results(
             "ci_low": ci[0],
             "ci_high": ci[1],
             "weight": field_weight,
-            "scores": scores,
+            "scores": scores
         })
 
-    # Calculate micro average
     if results:
-        results = pd.DataFrame(results)
+        results_df = pd.DataFrame(results)
 
-        scores = np.stack(results["scores"].values)
-        weight = results["weight"].fillna(1).values
+        if use_balanced_accuracy:
+            # --- Macro average ---
+            if weights is None:
+                macro_avg = np.nanmean(results_df["mean"])
+            else:
+                macro_avg = np.average(results_df["mean"], weights=results_df["weight"])
 
-        # Calculate per patient mean of score
-        patient_means = np.average(scores, axis=0, weights=weights)
+            if n_bootstrap > 1:
+                rng = np.random.default_rng()
+                boot_macro = []
+                for _ in range(n_bootstrap):
+                    idx = rng.integers(0, len(results_df), len(results_df))
+                    if weights is None:
+                        boot_macro.append(np.nanmean(results_df["mean"].iloc[idx]))
+                    else:
+                        boot_macro.append(
+                            np.average(results_df["mean"].iloc[idx], weights=results_df["weight"].iloc[idx])
+                        )
+                ci_macro = (np.nanpercentile(boot_macro, 2.5), np.nanpercentile(boot_macro, 97.5))
+            else:
+                std_err = np.nanstd(results_df["mean"], ddof=1) / np.sqrt(len(results_df))
+                ci_macro = t.interval(0.95, df=len(results_df)-1, loc=macro_avg, scale=std_err)
 
-        micro_avg = np.mean(patient_means)
-        std_err = np.std(patient_means, ddof=1) / np.sqrt(len(patient_means))
-        ci = t.interval(0.95, df=len(patient_means)-1, loc=micro_avg, scale=std_err)
+            avg_results = {
+                "field": "All Fields",
+                "metric_type": "macro_avg",
+                "mean": macro_avg,
+                "ci_low": ci_macro[0],
+                "ci_high": ci_macro[1],
+                "weight": None,
+                "scores": None
+            }
+        else:
+            # --- Micro average ---
+            scores = np.stack(results_df["scores"].values)  # shape: (fields, samples)
+            patient_means = np.nanmean(scores, axis=0)  # mean per patient
+            micro_avg = np.nanmean(patient_means)
 
-        micro_results = {
-            "field": "All Fields",
-            "metric_type": "micro_avg",
-            "mean": micro_avg,
-            "ci_low": ci[0],
-            "ci_high": ci[1],
-            "weight": None,
-            "scores": None
-        }
-        return pd.concat([results, pd.DataFrame([micro_results])], ignore_index=True)
-    else:
-        return None
+            if n_bootstrap > 1:
+                rng = np.random.default_rng()
+                boot_micro = [
+                    np.nanmean(np.nanmean(scores[:, idx], axis=0))
+                    for idx in (rng.integers(0, scores.shape[1], scores.shape[1]) for _ in range(n_bootstrap))
+                ]
+                ci_micro = (np.nanpercentile(boot_micro, 2.5), np.nanpercentile(boot_micro, 97.5))
+            else:
+                std_err = np.nanstd(patient_means, ddof=1) / np.sqrt(len(patient_means))
+                ci_micro = t.interval(0.95, df=len(patient_means)-1, loc=micro_avg, scale=std_err)
 
-def process_results(LLM_output: Union[pd.DataFrame, str], prompt_config: Union[Dict[str, Any], str], ground_truth: Optional[Union[pd.DataFrame, str]] = None, sentence_model: str = "all-mpnet-base-v2", scoring_weights: Optional[List[int]] = None, output_file: Optional[str] = None) -> None:
+            avg_results = {
+                "field": "All Fields",
+                "metric_type": "micro_avg",
+                "mean": micro_avg,
+                "ci_low": ci_micro[0],
+                "ci_high": ci_micro[1],
+                "weight": None,
+                "scores": None
+            }
+
+        return pd.concat([results_df, pd.DataFrame([avg_results])], ignore_index=True)
+    return None
+
+def process_results(
+    LLM_output: Union[pd.DataFrame, str], 
+    prompt_config: Union[Dict[str, Any], str], 
+    ground_truth: Optional[Union[pd.DataFrame, str]] = None, 
+    sentence_model: str = "all-mpnet-base-v2", 
+    scoring_weights: Optional[List[int]] = None, 
+    output_file: Optional[str] = None,
+    n_bootstrap: int = 1000,
+    use_balanced_accuracy: bool = False
+    ) -> None:
     """
     Process LLM output and compare it against ground truth.
 
@@ -239,6 +316,8 @@ def process_results(LLM_output: Union[pd.DataFrame, str], prompt_config: Union[D
         sentence_model (str): Sentence transformer model to use for semantic mapping.
         scoring_weights (Optional[List[int]]): Weights for each field used for micro averaging. This overrides the weights defined in the prompt config.
         output_file (Optional[str]): Path to save the results output file.
+        n_bootstrap (int): Number of bootstrap samples for CI; if <=1, skip bootstrapping.
+        use_balanced_accuracy (bool): If True, use balanced accuracy for categorical/binary fields instead of normal accuracy.
     """
     if isinstance(LLM_output, str):
         LLM_output = pd.read_csv(LLM_output, converters={"extracted_data": safe_literal_eval})
@@ -283,7 +362,15 @@ def process_results(LLM_output: Union[pd.DataFrame, str], prompt_config: Union[D
     sentence_model = SentenceTransformer(sentence_model)
 
     # Calculate results
-    results = calculate_results(prediction, ground_truth, prompt_config, sentence_model, scoring_weights)
+    results = calculate_results(
+        prediction=prediction, 
+        ground_truth=ground_truth, 
+        prompt_config=prompt_config, 
+        sentence_model=sentence_model, 
+        weights=scoring_weights, 
+        use_balanced_accuracy=use_balanced_accuracy,
+        n_bootstrap=n_bootstrap
+    )
 
     # If output file is specified, save the results
     if output_file:
@@ -332,6 +419,15 @@ if __name__ == "__main__":
         help="Path to save the results output file."
     )
     parser.add_argument(
+        "--bootstrap",
+        type=int,
+        default=1,
+        help="Number of n_bootstrap, if <= 1 than bootstrapping is not used.",
+    )
+    parser.add_argument(
+        "--balanced-accuracy", action="store_true", help="Do you want to calculate balanced accuracy instead of accuracy."
+    )
+    parser.add_argument(
         "-w",
         "--weights",
         nargs='+',
@@ -341,4 +437,13 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    process_results(args.LLM_output, args.prompt_config, args.ground_truth, args.sentence_model, args.weights, args.output_file)
+    process_results(
+        LLM_output=args.LLM_output,
+        prompt_config=args.prompt_config,
+        ground_truth=args.ground_truth,
+        sentence_model=args.sentence_model,
+        scoring_weights=args.weights,
+        output_file=args.output_file,
+        n_bootstrap=args.bootstrap,
+        use_balanced_accuracy=args.balanced_accuracy
+    )

@@ -106,8 +106,11 @@ def plot_barplot(
     ax.set_ylabel(ylabel, fontsize=subfontsize, labelpad=10)
     ax.set_xlabel(xlabel)
     ax.set_ylim(0, 1)
-    offset = n_hue / 10
-    ax.set_xlim(0 - offset, len(x_levels) - offset)
+    bar_positions = [patch.get_x() for patch in ax.patches]
+    bar_widths = [patch.get_width() for patch in ax.patches]
+    xmin = min(bar_positions)-0.2
+    xmax = max(x + w for x, w in zip(bar_positions, bar_widths))+0.2
+    ax.set_xlim(xmin, xmax)
     ax.tick_params(axis='x', labelrotation=45, labelsize=tickfontsize)
     ax.tick_params(axis='y', labelsize=tickfontsize)
     ax.set_title("", fontsize=subfontsize)
@@ -163,8 +166,8 @@ def plot_metric_summary(
     combined_results = pd.concat(processed_dfs)
     
     # Separate metric types
-    avg_df = combined_results[combined_results["metric_type"] == "micro_avg"]
-    acc_df = combined_results[combined_results["metric_type"] == "accuracy"]
+    avg_df = combined_results[combined_results["metric_type"].isin(["micro_avg", "macro_avg"])]
+    acc_df = combined_results[combined_results["metric_type"].isin(["accuracy", "balanced_accuracy"])]
     sim_df = combined_results[combined_results["metric_type"].str.contains("similarity")]
     num_avg = len(avg_df["field"].unique())
     num_acc = len(acc_df["field"].unique())
@@ -222,15 +225,25 @@ def plot_metric_summary(
             return ax
         return None
 
+    named_map = {
+        "macro_avg": "Macro-Average Score",
+        "micro_avg": "Micro-Average Score",
+        "balanced_accuracy": "Balanced Accuracy",
+        "accuracy": "Accuracy",
+    }
     
     axes = []
     # --- ax0: Micro-average ---
-    ax0 = safe_plot(0, avg_df, "Micro-Average Score")
+    ax0 = safe_plot(0, avg_df, named_map.get(avg_df["metric_type"].unique()[0], "") 
+                if len(avg_df["metric_type"].unique()) == 1 
+                else "Micro- and Macro-Average Score")
     if ax0:
         axes.append(ax0)
 
     # --- ax1: Accuracy ---
-    ax1 = safe_plot(1, acc_df, "Accuracy", sharey=ax0 if ax0 else None)
+    ax1 = safe_plot(1, acc_df, named_map.get(avg_df["metric_type"].unique()[0], "") 
+                if len(avg_df["metric_type"].unique()) == 1 
+                else "(Balanced) Accuracy", sharey=ax0 if ax0 else None)
     if ax1:
         axes.append(ax1)
 

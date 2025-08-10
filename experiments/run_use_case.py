@@ -537,6 +537,11 @@ if __name__ == "__main__":
         help="Number of GPUs to use for parallelization.",
     )
     parser.add_argument(
+        "--with-balanced-accuracy", 
+        action="store_true", 
+        help="Use balanced accuracy and macro average for performance calculation."
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="Print commands without running them."
     )
 
