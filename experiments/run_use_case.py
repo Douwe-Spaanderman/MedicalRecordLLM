@@ -38,6 +38,7 @@ class ExperimentRunner:
         node_parallelization: int = 1,
         vllm_timeout: int = 600,
         base_url: str = "http://localhost:8000/v1/",
+        balanced_accuracy: bool = False,
         dry_run: bool = False,
     ):
         self.data_path = data_path
@@ -57,6 +58,7 @@ class ExperimentRunner:
         self.node_parallelization = node_parallelization
         self.vllm_timeout = vllm_timeout
         self.base_url = base_url
+        self.balanced_accuracy = balanced_accuracy
         self.dry_run = dry_run
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -313,6 +315,11 @@ class ExperimentRunner:
             "-p", str(self.prompt_config_path),
             "-o", str(perf_output_path),
         ]
+        if self.balanced_accuracy:
+            command.extend([
+                "--bootstrap", "1000",
+                "--balanced-accuracy"
+            ])
 
         if self.dry_run:
             self.logger.info("[Dry Run] Would calculate performance with command: " + " ".join(command))
@@ -562,6 +569,7 @@ if __name__ == "__main__":
         gpu_parallelization=args.gpu_parallelization,
         node_parallelization=args.node_parallelization,
         vllm_timeout=args.vllm_timeout,
+        balanced_accuracy=args.with_balanced_accuracy,
         dry_run=args.dry_run,
     )
     runner.run()
