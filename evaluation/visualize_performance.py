@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import matplotlib.axes
 import seaborn as sns
 import pandas as pd
 from typing import Dict, Optional, Tuple, Union, List
@@ -105,6 +106,8 @@ def plot_barplot(
     ax.set_ylabel(ylabel, fontsize=subfontsize, labelpad=10)
     ax.set_xlabel(xlabel)
     ax.set_ylim(0, 1)
+    offset = n_hue / 10
+    ax.set_xlim(0 - offset, len(x_levels) - offset)
     ax.tick_params(axis='x', labelrotation=45, labelsize=tickfontsize)
     ax.tick_params(axis='y', labelsize=tickfontsize)
     ax.set_title("", fontsize=subfontsize)
@@ -115,9 +118,7 @@ def plot_barplot(
 
 def plot_metric_summary(
     input_data: Union[pd.DataFrame, List[pd.DataFrame], Dict[str, pd.DataFrame]], 
-    output_file: Optional[str] = None, 
-    weights: Dict[str, float] = None, 
-    figsize: Tuple[int] = (15, 5),
+    output_file: Optional[str] = None,
     data_labels: Optional[List[str]] = None,
     ranked_results: Optional[Union[str, pd.DataFrame]] = None
 ) -> None:
@@ -127,8 +128,6 @@ def plot_metric_summary(
     Args:
         input_data: Can be a single DataFrame, a list of DataFrames, or a dictionary of DataFrames
         output_file: Path to save the figure (optional)
-        weights: Dictionary of weights for fields (optional)
-        figsize: Figure size
         data_labels: Labels for each DataFrame (used when input_data is a list/dict)
         ranked_results: Path to a CSV file with ranked results or a DataFrame (optional)
     """
@@ -171,46 +170,97 @@ def plot_metric_summary(
     num_acc = len(acc_df["field"].unique())
     num_sim = len(sim_df["field"].unique())
 
-    # --- Dynamic subplot width allocation ---
-    num_avg = max(num_avg, 1)
-    acc_rel = max(num_acc, 1)
-    sim_rel = max(num_sim, 1)
-    total_rel = num_avg + acc_rel + sim_rel
-    widths = [num_avg / total_rel, acc_rel / total_rel, sim_rel / total_rel]
-    
-    fig = plt.figure(figsize=figsize, constrained_layout=True)
-    # Increase margins by adjusting subplot parameters
-    plt.subplots_adjust(left=0.1, right=0.9, top=0.9, bottom=0.2)
-    gs = fig.add_gridspec(1, 3, width_ratios=widths, wspace=0.15)  # Increased wspace
+    # Count active plots (those with data)
+    active_plots = sum(df is not None and not df.empty for df in [avg_df, acc_df, sim_df])
 
+    # Ensure nonzero relative counts
+    num_avg = max(num_avg, 1)
+    num_acc = max(num_acc, 1)
+    num_sim = max(num_sim, 1)
+
+    # Relative weights
+    total_rel = num_avg + num_acc + num_sim
+    widths = [num_avg / total_rel, num_acc / total_rel, num_sim / total_rel]
+
+    # Dynamic figure width based on both active plots and total relative size
+    base_width_per_unit = 1.3  # inches per "relative unit" per active plot
+    fig_width = base_width_per_unit * total_rel * (active_plots / 3)  # normalize for max 3 plots
+    fig_height = 5
+
+    # Create figure & gridspec
+    fig = plt.figure(figsize=(fig_width, fig_height), constrained_layout=True)
+    plt.subplots_adjust(left=0.1, right=0.9, top=0.9, bottom=0.2)
+    gs = fig.add_gridspec(1, 3, width_ratios=widths, wspace=0.15)
+
+    def safe_plot(ax_position: int, df: Optional[pd.DataFrame], y_label: str, sharey: Optional[matplotlib.axes.Axes] = None) -> Optional[matplotlib.axes.Axes]:
+        """
+        Safely create a barplot subplot if the provided DataFrame is not None or empty.
+        
+        Args:
+            ax_position: Index in the GridSpec where the subplot will be placed.
+            df: DataFrame containing plotting data.
+            y_label: Y-axis label for the plot.
+            sharey: Axis to share Y-axis scale with (optional).
+        
+        Returns:
+            The created matplotlib Axes object if plotted, otherwise None.
+        """
+        if df is not None and not df.empty:
+            ax = fig.add_subplot(gs[ax_position], sharey=sharey)
+            plot_barplot(
+                data=df,
+                x="field",
+                y="mean",
+                hue="source",
+                ylabel=y_label,
+                ci_lower="ci_low",
+                ci_upper="ci_high",
+                ax=ax,
+                wraptext=True,
+                legend=False
+            )
+            return ax
+        return None
+
+    
+    axes = []
     # --- ax0: Micro-average ---
-    ax0 = fig.add_subplot(gs[0])
-    plot_barplot(data=avg_df, x="field", y="mean", hue="source", ylabel="Micro-Average Score", ci_lower="ci_low", ci_upper="ci_high", ax=ax0, wraptext=True, legend=False)
+    ax0 = safe_plot(0, avg_df, "Micro-Average Score")
+    if ax0:
+        axes.append(ax0)
 
     # --- ax1: Accuracy ---
-    ax1 = fig.add_subplot(gs[1], sharey=ax0)
-    plot_barplot(data=acc_df, x="field", y="mean", hue="source", ylabel="Accuracy", ci_lower="ci_low", ci_upper="ci_high", ax=ax1, wraptext=True, legend=False)
+    ax1 = safe_plot(1, acc_df, "Accuracy", sharey=ax0 if ax0 else None)
+    if ax1:
+        axes.append(ax1)
 
     # --- ax2: Similarity ---
-    ax2 = fig.add_subplot(gs[2], sharey=ax0)
-    plot_barplot(data=sim_df, x="field", y="mean", hue="source", ylabel="Semantic Similarity", ci_lower="ci_low", ci_upper="ci_high", ax=ax2, wraptext=True, legend=False)
+    ax2 = safe_plot(2, sim_df, "Semantic Similarity", sharey=ax0 if ax0 else None)
+    if ax2:
+        axes.append(ax2)
 
-    # Shared legend for all axes, placed above the entire figure
-    handles, labels = ax1.get_legend_handles_labels()
+    # --- Shared Legend ---
+    if axes:  # Only if at least one plot exists
+        # Pick the first axis with data to get legend handles
+        first_ax = axes[0]
+        handles, labels = first_ax.get_legend_handles_labels()
 
-    # Add rank to labels if ranked results are provided
-    labels = add_ranks(ranked_results, labels)
-    fig.legend(
-        handles,
-        labels,
-        loc='upper center',
-        bbox_to_anchor=(0.5, 1.10),  # Adjust as needed
-        frameon=False,
-        ncol=len(data_labels) if data_labels else 1,
-    )
+        # Add rank to labels if ranked results are provided
+        labels = add_ranks(ranked_results, labels)
+
+        fig.legend(
+            handles,
+            labels,
+            loc='upper center',
+            bbox_to_anchor=(0.5, 1.10),
+            frameon=False,
+            ncol=len(data_labels) if data_labels else 1
+        )
+    else:
+        print("No data available to plot.")
 
     # Fix overlap and adjust layout
-    for ax in [ax0, ax1, ax2]:
+    for ax in axes:
         for label in ax.get_xticklabels():
             label.set_horizontalalignment('right')
 

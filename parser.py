@@ -1021,7 +1021,7 @@ class VLLMReportParser:
         else:
             system_instructions, field_instructions, task_instructions, examples_instructions, report_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt(chain=None)
             prompt = [
-                SystemMessage(system_instructions) if self.system_instructions_allowed else HumanMessage(system_instructions, name="system_instructions"),
+                SystemMessage(system_instructions, name="system_instructions") if self.system_instructions_allowed else HumanMessage(system_instructions, name="system_instructions"),
                 HumanMessage(field_instructions, name="field_instructions"),
                 HumanMessagePromptTemplate.from_template(task_instructions, additional_kwargs={"name": "task_instructions"}),
             ]

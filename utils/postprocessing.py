@@ -62,6 +62,9 @@ def map_option_items(LLM_output: pd.DataFrame, prompt_config: Dict[str, Any], mo
             # Add default option if it exists and not already in options
             if "default" in config and config["default"] not in options:
                 options = [config["default"]] + options
+            
+            # Sanitize to strings
+            options = [str(option) for option in options]
             option_embeddings = model.encode(options, convert_to_tensor=True)
             field_embeddings[field] = (options, option_embeddings)
 
