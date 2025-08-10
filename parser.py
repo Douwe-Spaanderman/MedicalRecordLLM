@@ -20,35 +20,218 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Base
 from langchain_core.output_parsers import BaseOutputParser
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
-from pydantic import create_model, Field
+from sentence_transformers import SentenceTransformer, util
+from pydantic import BaseModel, create_model, Field, validator
 from functools import wraps
+from enum import Enum
 import backoff
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+class SpecialValues(str, Enum):
+    MISSING = "missing"
+    DEFAULT = "default"
+    NOT_APPLICABLE = "n/a"
+    UNKNOWN = "unknown"
+
 class ReasoningAndDynamicJSONParser(BaseOutputParser):
-    def __init__(self, output_format: Dict[str, Any], dry_run: bool = False):
+    def __init__(self, output_format: Dict[str, Any], model: SentenceTransformer, dry_run: bool = False, special_values: List[str] = None):
         # Build pydantic fields dynamically from output_format
-        fields = {}
-        for key, val in output_format.items():
-            field_type = val["type"]
-            default = val.get("default", None)
-
-            if field_type == "string":
-                typ = Optional[str]
-            elif field_type == "list":
-                typ = Optional[List[str]]
-            elif field_type == "int":
-                typ = Optional[int]
-            else:
-                typ = Optional[Any]
-
-            fields[key] = (typ, Field(default=default, description=str(val.get("options", ""))))
-
-        self._output_model = create_model("ExtractedData", **fields)
+        super().__init__()
+        self._model = model
         self._logger = logging.getLogger(__name__)
         self._dry_run = dry_run
+        self._special_values = special_values or [v.value for v in SpecialValues]
+                
+        # Normalize the output_format by cleaning type names
+        self._output_format = {
+            field: {
+                **config,
+                "type": config["type"].replace("_or_missing", ""),
+                "original_type": config["type"]  
+            }
+            for field, config in output_format.items()
+        }
 
+        # Precompute embeddings for options
+        self._precompute_option_embeddings()
+        
+        # Create the dynamic model
+        self._output_model = self._create_dynamic_model()
+
+    def _precompute_option_embeddings(self):
+        """Precompute embeddings for categorical options only."""
+        self._field_embeddings = {}
+        for field, config in self._output_format.items():
+            if "options" in config and config["type"] not in ["int", "float", "number"]:
+                options = config["options"]
+                if "default" in config and config["default"] not in options:
+                    options = [config["default"]] + options
+                
+                self._field_embeddings[field] = {
+                    "options": [str(opt) for opt in options],
+                    "original_options": options,
+                    "embeddings": self._model.encode([str(opt) for opt in options], convert_to_tensor=True)
+                }
+
+    def _create_dynamic_model(self):
+        """Create a dynamic Pydantic model with built-in validation and transformation."""
+        fields = {}
+        validators = {}
+
+        for field_name, config in self._output_format.items():
+            # Determine field type
+            field_type = self._get_field_type(config["type"])
+            fields[field_name] = self._create_field_definition(field_type, config)
+            
+            # Add validator if field has options
+            if field_name in self._field_embeddings:
+                validators[f"validate_{field_name}"] = validator(field_name, allow_reuse=True)(
+                    self._create_categorical_validator(field_name, config)
+                )
+            elif config["type"] in ["int", "float", "number"] and "options" in config:
+                validators[f"validate_{field_name}"] = validator(field_name, allow_reuse=True)(
+                    self._create_numeric_options_validator(field_name, config)
+                )
+            elif config["type"] in ["int", "float", "number", "boolean", "binary"]:
+                validators[f"validate_{field_name}"] = validator(field_name, allow_reuse=True)(
+                    self._create_special_value_validator(field_name, config)
+                )
+
+        return create_model(
+            "DynamicOutputModel",
+            **fields,
+            __validators__=validators
+        )
+
+    def _get_field_type(self, type_str: str) -> type:
+        """Map type string to Python type."""
+        # There is always a string backup value, such as 'missing'
+        type_map = {
+            "string": str,
+            "list": List[str],
+            "int": Union[int, str],
+            "float": Union[float, str],
+            "number": Union[float, str],
+            "boolean": Union[bool, str],
+            "binary": Union[bool, str],
+            "categorical": str
+        }
+        return type_map.get(type_str, Any)
+
+    def _create_field_definition(self, field_type: type, config: Dict[str, Any]) -> tuple:
+        """Create a field definition with metadata."""
+        return (
+            Optional[field_type],
+            Field(
+                default=config.get("default"),
+                description=self._create_field_description(config)
+            )
+        )
+
+    def _create_field_description(self, config: Dict[str, Any]) -> str:
+        """Generate field description including options."""
+        desc = config.get("description", "")
+        if "options" in config:
+            desc += f" Options: {', '.join(str(o) for o in config['options'])}"
+        if config["type"] in ["int", "float", "number", "boolean", "binary"]:
+            desc += f" (Special values map to default: {', '.join(self._special_values)})"
+        return desc
+
+    def _create_categorical_validator(self, field_name: str, config: Dict[str, Any]):
+        """Validator for categorical fields with semantic matching."""
+        def validate_categorical(cls, v):
+            if v is None:
+                return config.get("default")
+                
+            field_data = self._field_embeddings[field_name]
+            v_str = str(v).strip().lower()
+            
+            # Check for exact match
+            for opt, original in zip(field_data["options"], field_data["original_options"]):
+                if v_str == opt.lower():
+                    return original
+            
+            # Semantic matching
+            v_embedding = self._model.encode(v_str, convert_to_tensor=True)
+            similarities = util.cos_sim(v_embedding, field_data["embeddings"])[0].cpu()
+            best_idx = int(np.argmax(similarities))
+            best_score = float(similarities[best_idx])
+            
+            return field_data["original_options"][best_idx] if best_score >= 0.5 else config.get("default")
+            
+        return validate_categorical
+
+    def _create_numeric_options_validator(self, field_name: str, config: Dict[str, Any]):
+        """Validator for numeric fields with discrete options."""
+        def validate_numeric_options(cls, v):
+            if v is None:
+                return config.get("default")
+                
+            # Handle special values
+            if isinstance(v, str) and v.lower() in self._special_values:
+                return config.get("default")
+                
+            # Handle range values (e.g., "10-20")
+            if isinstance(v, str) and re.match(r"^\d+\s*-\s*\d+$", v):
+                try:
+                    low, high = map(float, re.split(r"\s*-\s*", v))
+                    midpoint = (low + high) / 2
+                    return self._find_closest_numeric_option(config["options"], midpoint)
+                except (ValueError, TypeError):
+                    pass
+                    
+            # Convert to numeric value
+            try:
+                num_val = float(v) if config["type"] in ["float", "number"] else int(v)
+                return self._find_closest_numeric_option(config["options"], num_val)
+            except (ValueError, TypeError):
+                return config.get("default")
+                
+        return validate_numeric_options
+
+    def _find_closest_numeric_option(self, options: List[Any], value: float) -> Any:
+        """Find the closest numeric option to the given value."""
+        numeric_options = []
+        for opt in options:
+            try:
+                numeric_options.append(float(opt))
+            except (ValueError, TypeError):
+                continue
+                
+        if not numeric_options:
+            return options[0] if options else None
+            
+        closest = min(numeric_options, key=lambda x: abs(x - value))
+        return closest if isinstance(closest, type(value)) else type(value)(closest)
+
+    def _create_special_value_validator(self, field_name: str, config: Dict[str, Any]):
+        """Validator for handling special values in numeric/boolean fields."""
+        def validate_special_values(cls, v):
+            if v is None:
+                return config.get("default")
+                
+            # Handle special values - they always map to default
+            if isinstance(v, str) and v.lower() in self._special_values:
+                return config.get("default")
+                
+            # Convert string representations
+            if isinstance(v, str):
+                try:
+                    if config["type"] in ["int", "float", "number"]:
+                        return float(v) if config["type"] in ["float", "number"] else int(v)
+                    elif config["type"] in ["boolean", "binary"]:
+                        if v.lower() in ["true", "yes", "1"]:
+                            return True
+                        if v.lower() in ["false", "no", "0"]:
+                            return False
+                except (ValueError, TypeError):
+                    return config.get("default")
+                    
+            return v
+            
+        return validate_special_values
+    
     def parse(self, text: str) -> Dict[str, Any]:
         if self._dry_run:
             return {
@@ -203,6 +386,7 @@ class VLLMReportParser:
         max_concurrent: int = 32,
         select_example: Optional[str] = None,
         patterns_path: Optional[str] = None,
+        sentence_model: str = "all-mpnet-base-v2",
         save_raw_output: bool = False,
         verbose: bool = False,
         dry_run: bool = False
@@ -274,6 +458,9 @@ class VLLMReportParser:
                 "Falling back to individual patient prompting instead."
             )
             self.batch_size = None
+
+        # Load sentence_model embedding model
+        self.sentence_model = SentenceTransformer(sentence_model)
 
         self.dry_run = dry_run
         if self.dry_run:
@@ -1013,10 +1200,10 @@ class VLLMReportParser:
 
                 prompt_templates.append(prompt_template)
                 output_formats.update(output_format)
-                parsers.append(ReasoningAndDynamicJSONParser(output_format, dry_run=self.dry_run))
+                parsers.append(ReasoningAndDynamicJSONParser(output_format, model=self.sentence_model, dry_run=self.dry_run))
             
             # Bit ugly, but saving the to the final output model manually and using after invoke to structure data
-            self.final_parser = ReasoningAndDynamicJSONParser(output_formats, dry_run=self.dry_run)._output_model
+            self.final_parser = ReasoningAndDynamicJSONParser(output_formats, model=self.sentence_model, dry_run=self.dry_run)._output_model
             self.chat_chain = self._create_prompt_graph(prompt_templates, parsers)
         else:
             system_instructions, field_instructions, task_instructions, examples_instructions, report_instructions, final_instructions, prompt_variables, output_format = self._generate_prompt(chain=None)
@@ -1053,7 +1240,7 @@ class VLLMReportParser:
             prompt_template = prompt_template.partial(**prompt_variables)
             prompt_template = prompt_template.pipe(self.add_names_to_messages)
 
-            parser = ReasoningAndDynamicJSONParser(output_format, dry_run=self.dry_run)
+            parser = ReasoningAndDynamicJSONParser(output_format, model=self.sentence_model, dry_run=self.dry_run)
             base_chain = prompt_template | self.llm | parser
             if self.prompt_method == "SelfConsistency":
                 # Initialize our fast ensemble strategy
