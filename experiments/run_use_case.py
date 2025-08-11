@@ -39,6 +39,7 @@ class ExperimentRunner:
         vllm_timeout: int = 600,
         base_url: str = "http://localhost:8000/v1/",
         balanced_accuracy: bool = False,
+        measurement_run: bool = False,
         dry_run: bool = False,
     ):
         self.data_path = data_path
@@ -59,12 +60,18 @@ class ExperimentRunner:
         self.vllm_timeout = vllm_timeout
         self.base_url = base_url
         self.balanced_accuracy = balanced_accuracy
+        self.measurement_run = measurement_run
         self.dry_run = dry_run
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.performance_files = defaultdict(list)
         self.ranked_results = {}
         self.logger = logging.getLogger(__name__)
+        if self.dry_run:
+            self.logger(f"[Dry Run] activated, no prompting or calculations will be done")
+        if self.measurement_run:
+            self.logger(f"[Measurement Run] activated, no prompting will be done")
+
         self.load_overrides()
 
     def log_command(self, command, stage="execution"):
@@ -143,7 +150,7 @@ class ExperimentRunner:
         for model_config_path in self.model_configs:
             model_config = self.read_config(model_config_path)
             model_name = model_config.get("model", model_config_path.stem).split("/")[-1]
-            if self.vllm_server:
+            if self.vllm_server and not self.measurement_run:
                 vllm_process = self.start_vllm_server(model_config)
 
             try:
@@ -157,7 +164,7 @@ class ExperimentRunner:
             for prompt_method in self.prompt_methods:
                 self.run_single_experiment(prompt_method, model_config_path, model_config)
 
-            if vllm_process or self.dry_run:
+            if vllm_process or self.dry_run and not self.measurement_run:
                 self.kill_vllm_server(vllm_process)
 
             self.logger.info(f"[Completed] All experiments for model {model_config.get('model', model_config_path.stem)}")
@@ -209,6 +216,8 @@ class ExperimentRunner:
         if self.dry_run:
            self.logger.info("[Dry Run] Would ping vLLM server to see if up")
            return True 
+        elif self.measurement_run:
+            return True
 
         self.logger.info("[Waiting] for vLLM server to become ready...")
 
@@ -274,19 +283,22 @@ class ExperimentRunner:
         if self.dry_run:
             self.logger.info("[Dry Run] Would run experiment with command: " + " ".join(command))
             return
-
-        try:
-            self.log_command(command)
-            subprocess.run(command, check=True)
-            self.logger.info(f"[Success] Experiment completed for {prompt_method} + {model_name}")
-            self.logger.info(f"[Output] Results saved to {output_file}")
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"[Error] Failed to run experiment for {prompt_method} + {model_name}")
-            self.logger.error(e)
-            return
-        except Exception as e:
-            self.logger.error(f"[Unexpected Error] {str(e)}")
-            return
+        
+        if self.measurement_run:
+            self.logger.info("[Measurement Run] Skip running experiment, going straight to measurement calculations")
+        else:
+            try:
+                self.log_command(command)
+                subprocess.run(command, check=True)
+                self.logger.info(f"[Success] Experiment completed for {prompt_method} + {model_name}")
+                self.logger.info(f"[Output] Results saved to {output_file}")
+            except subprocess.CalledProcessError as e:
+                self.logger.error(f"[Error] Failed to run experiment for {prompt_method} + {model_name}")
+                self.logger.error(e)
+                return
+            except Exception as e:
+                self.logger.error(f"[Unexpected Error] {str(e)}")
+                return
 
         try:
             self.run_single_calculation(output_file, prompt_method, model_name)
@@ -549,6 +561,9 @@ if __name__ == "__main__":
         help="Use balanced accuracy and macro average for performance calculation."
     )
     parser.add_argument(
+        "--measurement-run", action="store_true", help="Perform only measurement without prompting llm."
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="Print commands without running them."
     )
 
@@ -570,6 +585,7 @@ if __name__ == "__main__":
         node_parallelization=args.node_parallelization,
         vllm_timeout=args.vllm_timeout,
         balanced_accuracy=args.with_balanced_accuracy,
+        measurement_run=args.measurement_run,
         dry_run=args.dry_run,
     )
     runner.run()
