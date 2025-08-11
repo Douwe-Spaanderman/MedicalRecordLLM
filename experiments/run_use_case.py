@@ -68,9 +68,9 @@ class ExperimentRunner:
         self.ranked_results = {}
         self.logger = logging.getLogger(__name__)
         if self.dry_run:
-            self.logger(f"[Dry Run] activated, no prompting or calculations will be done")
+            self.logger.info(f"[Dry Run] activated, no prompting or calculations will be done")
         if self.measurement_run:
-            self.logger(f"[Measurement Run] activated, no prompting will be done")
+            self.logger.info(f"[Measurement Run] activated, no prompting will be done")
 
         self.load_overrides()
 
