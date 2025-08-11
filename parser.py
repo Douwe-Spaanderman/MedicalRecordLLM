@@ -63,7 +63,7 @@ class ReasoningAndDynamicJSONParser(BaseOutputParser):
         """Precompute embeddings for categorical options only."""
         self._field_embeddings = {}
         for field, config in self._output_format.items():
-            if "options" in config and config["type"] not in ["int", "float", "number"]:
+            if "options" in config and config["type"] not in ["int", "float", "number", "boolean", "binary"]:
                 options = config["options"]
                 if "default" in config and config["default"] not in options:
                     options = [config["default"]] + options
@@ -113,8 +113,8 @@ class ReasoningAndDynamicJSONParser(BaseOutputParser):
             "int": Union[int, str],
             "float": Union[float, str],
             "number": Union[float, str],
-            "boolean": Union[bool, str],
-            "binary": Union[bool, str],
+            "boolean": Union[bool, int, str],
+            "binary": Union[bool, int, str],
             "categorical": str
         }
         return type_map.get(type_str, Any)
@@ -1428,7 +1428,7 @@ class VLLMReportParser:
                             
                         field = edge["condition"]["field"]
                         value = edge["condition"]["value"]
-                        if str(state.get("current_values", {}).get(field)) == str(value):
+                        if str(state.get("current_values", {}).get(field)).strip().lower() == str(value).strip().lower():
                             return f"cond_{field}={value}"
                     
                     # Explicitly check for else condition if it exists
