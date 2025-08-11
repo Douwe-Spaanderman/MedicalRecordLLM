@@ -150,7 +150,7 @@ class ExperimentRunner:
         for model_config_path in self.model_configs:
             model_config = self.read_config(model_config_path)
             model_name = model_config.get("model", model_config_path.stem).split("/")[-1]
-            if self.vllm_server and not self.measurement_run:
+            if self.vllm_server:
                 vllm_process = self.start_vllm_server(model_config)
 
             try:
@@ -195,6 +195,8 @@ class ExperimentRunner:
         if self.dry_run:
             self.logger.info("[Dry Run] Starting vLLM server with command: " + " ".join(command))
             return None
+        elif self.measurement_run:
+            return True
         
         self.log_command(command)
         self.logger.info(f"[Starting vLLM] {model_config['model']}")
@@ -243,6 +245,9 @@ class ExperimentRunner:
         if self.dry_run:
             self.logger.info("[Dry Run] Would kill vLLM server")
             return
+        elif self.measurement_run:
+            return
+
         self.logger.info("[Killing vLLM] ...")
         process.terminate()
         try:
