@@ -1,0 +1,7 @@
+# debug_config.yaml
+model: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+max_model_len: 512
+max_tokens: null
+temperature: 0.3
+top_p: 0.9
+repetition_penalty: 1.2

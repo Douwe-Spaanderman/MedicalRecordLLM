@@ -1,0 +1,193 @@
+field_instructions:
+  - name: "Specimen Type"
+    type: "string"
+    options:
+      - "Biopsy"
+      - "Resection"
+      - "Cytology"
+      - "Other"
+    default: "Not specified"
+    chain_order: 1
+
+  - name: "Pathology Request Reason"
+    type: "string"
+    options:
+      - "Suspicion of tumor"
+      - "Metastasis"
+      - "Follow-up"
+      - "Recurrent tumor"
+      - "Reassessment"
+      - "Not specified"
+    default: "Not specified"
+    chain_order: 1
+
+  - name: "Disease Type"
+    type: "string"
+    constraints: "Short name based on Unified Medical Language System (UMLS)"
+    default: "Not specified"
+    chain_order: 2
+
+  - name: "Disease Type differential diagnosis"
+    type: "list"
+    constraints: "Array of standardized possible differential diagnoses (based on Unified Medical Language System)"
+    default: []
+    chain_order: 2
+
+  - name: "Is it a soft tissue tumor?"
+    type: "string"
+    options:
+      - "Yes"
+      - "No"
+    default: "Not specified"
+    chain_order: 3
+
+  - name: "Is it suspected or confirmed?"
+    type: "string"
+    options:
+      - "Suspected"
+      - "Confirmed"
+    default: "Not specified"
+    chain_order: 3
+
+  - name: "Is it benign or malignant?"
+    type: "string"
+    options:
+      - "Benign"
+      - "Intermediate"
+      - "Malignant"
+    default: "Not specified"
+    chain_order: 4
+
+  - name: "Tumor Grade"
+    type: "string"
+    options:
+      - "G1"
+      - "G2"
+      - "G3"
+      - "Low-grade"
+      - "High-grade"
+      - "No grade"
+      - "Not specified"
+    constraints: |
+      If benign: Always use "No grade" even if grade is not mentioned.
+      Preferred: FNCLCC grading (G1, G2, G3)
+      Fallback: "Low-grade" or "High-grade" if FNCLCC unavailable
+    default: "Not specified"
+    chain_order: 4
+
+  - name: "Tumor Location"
+    type: "string"
+    constraints: "Use a standard UMLS-based anatomical term (e.g., 'Lung', 'Breast')"
+    default: "Not specified"
+    required: true
+    chain_order: 5
+
+  - name: "Quality Check"
+    type: "string"
+    constraints: |
+      Evaluate the report for logical consistency and medical plausibility.
+      Flag unclear or contradictory findings.
+      Briefly explain any quality concerns identified.
+    default: "No issues detected"
+    chain_order: 6
+    
+task: |
+  Extract information into this exact JSON structure:
+  ```json
+  {
+      "Specimen Type": "",
+      "Pathology Request Reason": "",
+      "Disease Type": "",
+      "Disease Type differential diagnosis": [],
+      "Is it a soft tissue tumor?": "",
+      "Is it suspected or confirmed?": "",
+      "Is it benign or malignant?": "",
+      "Tumor Grade": "",
+      "Tumor Location": "",
+      "Quality Check": ""
+  }```
+    
+examples:
+  - input: |
+      anonymized for github
+    reasoning: |
+      - The report clearly indicates the specimen was a "biopsy" in the section "Method of acquisition: biopsy", so the "Specimen Type" is "Biopsy".
+      - The clinical question is explicitly stated as "Clinical question: metastasis or sarcoma?", which maps directly to the field option "Metastasis" for "Pathology Request Reason".
+      - The conclusion section describes a "sarcoma with myxoid stroma" and lists differentials including "myxoinflammatory fibroblastic sarcoma", "myxofibrosarcoma", and "pleomorphic undifferentiated". These are subtypes of myxoid sarcoma, so "Disease Type" is "Myxoid sarcoma".
+      - The differentials listed—"myxoinflammatory fibroblastic sarcoma", "myxofibrosarcoma", and "pleomorphic undifferentiated"—are included in the standardized list under "Disease Type differential diagnosis" as ["Myxoinflammatory fibroblastic sarcoma", "Myxofibrosarcoma", "Pleomorphic undifferentiated sarcoma"].
+      - Since this is a sarcoma, which by definition arises in soft tissues, the answer to "Is it a soft tissue tumor?" is "Yes".
+      - The report uses the phrase "differential diagnosis", indicating the diagnosis is not definitive; therefore, "Is it suspected or confirmed?" is "Suspected".
+      - The description includes features such as necrosis and mitotic activity (5 mitoses per 10 high power fields), which are consistent with malignancy. Sarcomas are malignant by default unless otherwise specified, so "Is it benign or malignant?" is "Malignant".
+      - No tumor grade is provided (e.g. no FNCLCC grade or statement like high-grade/low-grade), so "Tumor Grade" is "Not specified".
+      - The tumor is described as being "intramuscular right thigh", which maps to the standard UMLS anatomical location "Right leg".
+      - For "Quality Check": all extracted data is logically consistent with the pathology report. However, tumor grade is missing, and the mitotic rate is given but without an explicit grading system, so the output should be flagged for potential clinical clarification.
+    output: |
+      ```json
+      {
+        "Specimen Type": "Biopsy",
+        "Pathology Request Reason": "Metastasis",
+        "Disease Type": "Myxoid sarcoma",
+        "Disease Type differential diagnosis": ["Myxoinflammatory fibroblastic sarcoma", "Myxofibrosarcoma", "Pleomorphic undifferentiated sarcoma"],
+        "Is it a soft tissue tumor?": "Yes",
+        "Is it suspected or confirmed?": "Suspected",
+        "Is it benign or malignant?": "Malignant",
+        "Tumor Grade": "Not specified",
+        "Tumor Location": "Right leg",
+        "Quality Check": "The extracted data is consistent with the pathology report. However, tumor grade and mitotic figure count are not specified. Further information or consultation may be necessary."
+      }```
+  - input: |
+      anonymized for github
+    reasoning: |
+      - The "Method of acquisition" is clearly listed as "resection", so the correct "Specimen Type" is "Resection".
+      - The "Clinical question" is "soft tissue tumor characterization" which fits best with "Suspicion of tumor" from the available options under "Pathology Request Reason".
+      - The final diagnosis is "lipoma with focal atypia", which maps to the UMLS term "Lipoma" for "Disease Type".
+      - No differentials are provided in the report, so "Disease Type differential diagnosis" should be an empty list.
+      - Lipomas are soft tissue tumors composed of adipose tissue, so "Is it a soft tissue tumor?" is "Yes".
+      - The diagnosis is definitive ("lipoma with focal atypia") and not presented as a differential, so "Is it suspected or confirmed?" is "Confirmed".
+      - A lipoma is a benign tumor, so "Is it benign or malignant?" is "Benign".
+      - As per the rules, benign tumors should be labeled as "No grade", even if no grade is provided in the report.
+      - The mass is in the "left shoulder", which maps to the standardized anatomical location "Left shoulder" in UMLS terminology.
+      - The report is internally consistent: although "focal atypia" is mentioned, immunohistochemistry and morphology support a benign diagnosis. There are no contradictions or missing grade data that require clarification.
+    output: |
+      ```json
+      {
+        "Specimen Type": "Resection",
+        "Pathology Request Reason": "Suspicion of tumor",
+        "Disease Type": "Lipoma",
+        "Disease Type differential diagnosis": [],
+        "Is it a soft tissue tumor?": "Yes",
+        "Is it suspected or confirmed?": "Confirmed",
+        "Is it benign or malignant?": "Benign",
+        "Tumor Grade": "No grade",
+        "Tumor Location": "Left shoulder",
+        "Quality Check": "The extracted data is consistent with the pathology report. Diagnosis is clearly benign despite focal atypia. No issues detected."
+      }
+      ```
+  - input: |
+      anonymized for github
+    reasoning: |
+      - The "Method of acquisition" is explicitly "resection", so "Specimen Type" is "Resection".
+      - The clinical question is "rule out high-grade sarcoma", which aligns best with "Suspicion of tumor" under "Pathology Request Reason".
+      - The conclusion gives a diagnosis of "high-grade pleomorphic sarcoma", which maps to the UMLS concept "Pleomorphic sarcoma" for "Disease Type".
+      - The differential diagnosis includes "undifferentiated pleomorphic sarcoma" and "pleomorphic leiomyosarcoma", so these are included under "Disease Type differential diagnosis".
+      - This is a type of soft tissue tumor, so "Is it a soft tissue tumor?" is "Yes".
+      - The diagnosis is stated definitively, so "Is it suspected or confirmed?" is "Confirmed".
+      - The term "high-grade sarcoma" indicates malignancy, so "Is it benign or malignant?" is "Malignant".
+      - FNCLCC grade is explicitly stated as "G3", so "Tumor Grade" is "G3".
+      - The tumor is located in the "right calf" so "Tumor Location" is "Right Leg".
+      - All information is consistent and clearly supports a high-grade malignant sarcoma diagnosis. No quality issues are present.
+    output: |
+      ```json
+      {
+        "Specimen Type": "Resection",
+        "Pathology Request Reason": "Suspicion of tumor",
+        "Disease Type": "Pleomorphic sarcoma",
+        "Disease Type differential diagnosis": ["Undifferentiated pleomorphic sarcoma", "Pleomorphic leiomyosarcoma"],
+        "Is it a soft tissue tumor?": "Yes",
+        "Is it suspected or confirmed?": "Confirmed",
+        "Is it benign or malignant?": "Malignant",
+        "Tumor Grade": "G3",
+        "Tumor Location": "Right Leg",
+        "Quality Check": "The extracted data is consistent with the pathology report. FNCLCC grading is provided, and the diagnosis is clearly malignant. No issues detected."
+      }
+      ```
