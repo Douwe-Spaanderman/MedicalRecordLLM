@@ -524,6 +524,12 @@ if __name__ == "__main__":
         help="YAML file with timeout and concurrent overrides for models and methods.",
     )
     parser.add_argument(
+        "--vllm-base-url",
+        type=str,
+        default="http://localhost:8000/v1/",
+        help="base url for vllm to use.",
+    )
+    parser.add_argument(
         "--vllm-server",
         action="store_true",
         help="Run vLLM server for each model configuration.",
@@ -589,6 +595,7 @@ if __name__ == "__main__":
         gpu_parallelization=args.gpu_parallelization,
         node_parallelization=args.node_parallelization,
         vllm_timeout=args.vllm_timeout,
+        base_url=args.vllm_base_url,
         balanced_accuracy=args.with_balanced_accuracy,
         measurement_run=args.measurement_run,
         dry_run=args.dry_run,

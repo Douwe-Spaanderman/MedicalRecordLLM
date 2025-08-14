@@ -141,8 +141,18 @@ class LogParser:
             for model, strategies in self.experiment_data.items()
         }
 
-        with open(output_path, "w") as f:
-            json.dump(serializable_data, f, indent=2)
+        output_path = Path(output_path)
+        if output_path.exists():
+            try:
+                existing_data = json.loads(output_path.read_text())
+            except json.JSONDecodeError:
+                existing_data = {}
+        else:
+            existing_data = {}
+
+        existing_data.update(serializable_data)
+
+        output_path.write_text(json.dumps(existing_data, indent=2))
 
         print(f"Data written to {output_path}")
 
