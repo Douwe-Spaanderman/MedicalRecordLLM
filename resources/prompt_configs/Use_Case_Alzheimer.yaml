@@ -1,0 +1,504 @@
+field_instructions:
+  - name: "Fazekas score"
+    type: "number_or_missing"
+    options:
+      - 0
+      - 0.5
+      - 1
+      - 1.5
+      - 2
+      - 2.5
+      - 3
+      - "missing"
+    constraints: |
+      Return the Fazekas score (0-3).
+      If given as a range (e.g., 1-2), return the average (e.g., 1.5).
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 1
+
+  - name: "MTA left"
+    type: "number_or_missing"
+    options:
+      - 0
+      - 0.5
+      - 1
+      - 1.5
+      - 2
+      - 2.5
+      - 3
+      - 3.5
+      - 4
+      - "missing"
+    constraints: |
+      Return the MTA score for the left side (0-4).
+      If given as a range (e.g., 1-2), return the average (e.g., 1.5).
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 1
+
+  - name: "MTA right"
+    type: "number_or_missing"
+    options:
+      - 0
+      - 0.5
+      - 1
+      - 1.5
+      - 2
+      - 2.5
+      - 3
+      - 3.5
+      - 4
+      - "missing"
+    constraints: |
+      Return the MTA score for the right side (0-4).
+      If given as a range (e.g., 1-2), return the average (e.g., 1.5).
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 1
+
+  - name: "GCA frontal"
+    type: "number_or_missing"
+    options:
+      - 0
+      - 0.5
+      - 1
+      - 1.5
+      - 2
+      - 2.5
+      - 3
+      - "missing"
+    constraints: |
+      Return the GCA score of the frontal lobe (0-3).
+      If given as a range (e.g., 1-2), return the average (e.g., 1.5).
+      If only a generalized GCA score is reported, use that.
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 2
+
+  - name: "GCA temporal"
+    type: "number_or_missing"
+    options:
+      - 0
+      - 0.5
+      - 1
+      - 1.5
+      - 2
+      - 2.5
+      - 3
+      - "missing"
+    constraints: |
+      Return the GCA score of the temporal lobe (0-3).
+      If given as a range (e.g., 1-2), return the average (e.g., 1.5).
+      If only a generalized GCA score is reported, use that.
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 2
+
+  - name: "GCA occipital"
+    type: "number_or_missing"
+    options:
+      - 0
+      - 0.5
+      - 1
+      - 1.5
+      - 2
+      - 2.5
+      - 3
+      - "missing"
+    constraints: |
+      Return the GCA score of the occipital lobe (0-3).
+      If given as a range (e.g., 1-2), return the average (e.g., 1.5).
+      If only a generalized GCA score is reported, use that.
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 2
+
+  - name: "GCA parietal"
+    type: "number_or_missing"
+    options:
+      - 0
+      - 0.5
+      - 1
+      - 1.5
+      - 2
+      - 2.5
+      - 3
+      - "missing"
+    constraints: |
+      Return the GCA score of the parietal lobe (0-3).
+      If given as a range (e.g., 1-2), return the average (e.g., 1.5).
+      If only a generalized GCA score is reported, use that.
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 2
+
+  - name: "GCA overall"
+    type: "number_or_missing"
+    options:
+      - 0
+      - 0.5
+      - 1
+      - 1.5
+      - 2
+      - 2.5
+      - 3
+      - "missing"
+    constraints: |
+      Return the overall GCA score (0-3).
+      If only lobar scores are provided, return the highest.
+      If given as a range (e.g., 1-2), return the average (e.g., 1.5).
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 2
+
+  - name: "Any brain infarct"
+    type: "binary_or_missing"
+    options:
+      - 0
+      - 1
+      - "missing"
+    constraints: |
+      Return 1 if any type of infarct is present.
+      Return 0 if explicitly absent (no infarcts).
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 3
+
+  - name: "Total number of brain infarcts"
+    type: "number_or_missing"
+    constraints: |
+      Return the total number of infarcts (of any type).
+      If not mentioned but presence is confirmed, return 1.
+      If explicitly absent, return 0.
+      If not mentioned at all, return 'missing'.
+    default: "missing"
+    chain_order: 3
+
+  - name: "Cortical infarcts"
+    type: "binary_or_missing"
+    options:
+      - 0
+      - 1
+      - "missing"
+    constraints: |
+      Return 1 if cortical infarcts are present.
+      Return 0 if explicitly absent.
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 3
+
+  - name: "Number of cortical infarcts"
+    type: "number_or_missing"
+    constraints: |
+      Return the total number of cortical infarcts.
+      If not mentioned but presence is confirmed, return 1.
+      If explicitly absent, return 0.
+      If not mentioned at all, return 'missing'.
+    default: "missing"
+    chain_order: 3
+
+  - name: "Lacunes infarcts"
+    type: "binary_or_missing"
+    options:
+      - 0
+      - 1
+      - "missing"
+    constraints: |
+      Return 1 if lacunar infarcts (lacunes) are present.
+      Return 0 if explicitly absent.
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 3
+
+  - name: "Number of lacunar infarcts"
+    type: "number_or_missing"
+    constraints: |
+      Return the total number of lacunar infarcts.
+      If not mentioned but presence is confirmed, return 1.
+      If explicitly absent, return 0.
+      If not mentioned at all, return 'missing'.
+    default: "missing"
+    chain_order: 3
+
+  - name: "Cerebellar infarcts"
+    type: "binary_or_missing"
+    options:
+      - 0
+      - 1
+      - "missing"
+    constraints: |
+      Return 1 if cerebellar infarcts are present.
+      Return 0 if explicitly absent.
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 3
+
+  - name: "Number of cerebellar infarcts"
+    type: "number_or_missing"
+    constraints: |
+      Return the total number of cerebellar infarcts.
+      If not mentioned but presence is confirmed, return 1.
+      If explicitly absent, return 0.
+      If not mentioned at all, return 'missing'.
+    default: "missing"
+    chain_order: 3
+
+  - name: "Splinter infarcts"
+    type: "binary_or_missing"
+    options:
+      - 0
+      - 1
+      - "missing"
+    constraints: |
+      Return 1 if splinter infarcts are present.
+      Return 0 if explicitly absent.
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 3
+
+  - name: "DWI abnormalities"
+    type: "binary_or_missing"
+    options:
+      - 0
+      - 1
+      - "missing"
+    constraints: |
+      Return 1 if DWI shows diffusion restriction.
+      Return 0 if explicitly normal.
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 4
+
+  - name: "SWI abnormalities"
+    type: "binary_or_missing"
+    options:
+      - 0
+      - 1
+      - "missing"
+    constraints: |
+      Return 1 if SWI shows abnormalities.
+      Return 0 if explicitly normal.
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 4
+
+  - name: "Presence of Microbleeds"
+    type: "binary_or_missing"
+    options:
+      - 0
+      - 1
+      - "missing"
+    constraints: |
+      Return 1 if microbleeds are present.
+      Return 0 if explicitly absent.
+      If not mentioned, return 'missing'.
+    default: "missing"
+    chain_order: 5
+
+  - name: "Total number of microbleeds"
+    type: "number"
+    constraints: |
+      Return the total number of microbleeds.
+      If not mentioned but presence is confirmed, return 1.
+      If explicitly absent, return 0.
+      If not mentioned at all, return 'missing'.
+    default: "missing"
+    chain_order: 5
+
+  - name: "Presence of siderosis"
+    type: "binary"
+    options:
+      - 0
+      - 1
+    constraints: |
+      Return 1 if superficial siderosis is mentioned.
+      Otherwise, return 0.
+    default: 0
+    chain_order: 6
+
+task: |
+  Extract the neuroimaging findings into this exact JSON structure:
+  ```json
+  {
+    "Fazekas score": "number_or_missing",
+    "MTA left": "number_or_missing",
+    "MTA right": "number_or_missing",
+    "GCA frontal": "number_or_missing",
+    "GCA temporal": "number_or_missing",
+    "GCA parietal": "number_or_missing",
+    "GCA occipital": "number_or_missing",
+    "GCA overall": "number_or_missing",
+    "Any brain infarct": "binary_or_missing",
+    "Total number of brain infarcts": "number_or_missing",
+    "Cortical infarcts": "binary_or_missing",
+    "Number of cortical infarcts": "number_or_missing",
+    "Lacunes infarcts": "binary_or_missing",
+    "Number of lacunar infarcts": "number_or_missing",
+    "Cerebellar infarcts": "binary_or_missing",
+    "Number of cerebellar infarcts": "number_or_missing",
+    "Splinter infarcts": "binary_or_missing",
+    "DWI abnormalities": "binary_or_missing",
+    "SWI abnormalities": "binary_or_missing",
+    "Presence of Microbleeds": "binary_or_missing",
+    "Total number of microbleeds": "number_or_missing",
+    "Presence of siderosis": "binary"
+  }```
+
+examples:
+  - input: |
+      anonymized for github
+    reasoning: |
+      - Fazekas score is missing because the report explicitly states no score was provided
+      - MTA left scores 1 based on "milde bilaterale mediale temporale atrofie, scorend 1"
+      - MTA right also scores 1 as the atrophy is described as bilateral
+      - GCA frontal is 1 from "lichte prominentie in de frontale regio's" with overall GCA 1
+      - GCA temporal is 1 due to temporal region prominence mentioned alongside frontal
+      - GCA parietal is missing as parietal regions aren't mentioned in the report
+      - GCA occipital is missing with no mention of occipital findings
+      - GCA overall is 1 per explicit "Globale corticale atrofie... mild (GCA score 1)"
+      - Any brain infarct is 0 given explicit absence of both lacunar and cortical infarcts
+      - Total number of brain infarcts is 0 since no infarcts are present
+      - Cortical infarcts are 0 as "geen corticale infarcten" is stated
+      - Number of cortical infarcts is 0 by implication of absence
+      - Lacunes infarcts are 0 per "geen lacunaire infarcten"
+      - Number of lacunar infarcts is 0 with none present
+      - Cerebellar infarcts are missing as cerebellum isn't mentioned
+      - Number of cerebellar infarcts is missing without cerebellar assessment
+      - Splinter infarcts are missing with no report reference
+      - DWI abnormalities are 0 based on "geen diffusie restrictie"
+      - SWI abnormalities are 0 since no microbleeds were identified
+      - Presence of Microbleeds is 0 matching SWI findings
+      - Total number of microbleeds is 0 with none detected
+      - Presence of siderosis is 0 per "geen siderose" statement
+    output: |
+      ```json
+      {
+        "Fazekas score": "missing",
+        "MTA left": 1,
+        "MTA right": 1,
+        "GCA frontal": 1,
+        "GCA temporal": 1,
+        "GCA parietal": "missing",
+        "GCA occipital": "missing",
+        "GCA overall": 1,
+        "Any brain infarct": 0,
+        "Total number of brain infarcts": 0,
+        "Cortical infarcts": 0,
+        "Number of cortical infarcts": 0,
+        "Lacunes infarcts": 0,
+        "Number of lacunar infarcts": 0,
+        "Cerebellar infarcts": "missing",
+        "Number of cerebellar infarcts": "missing",
+        "Splinter infarcts": "missing",
+        "DWI abnormalities": 0,
+        "SWI abnormalities": 0,
+        "Presence of Microbleeds": 0,
+        "Total number of microbleeds": 0,
+        "Presence of siderosis": 0
+      }
+      ```
+  - input: |
+      anonymized for github
+    reasoning: |
+      - Fazekas score is 3 based on explicit "Fazekas-score van 3" for white matter hyperintensities
+      - MTA left scores 4 from "bilaterale ernstige mediale temporaalkwab atrofie (MTA 4)"
+      - MTA right also scores 4 as the severe atrophy is bilateral
+      - GCA frontal is 3 using the overall GCA score since frontal isn't specifically mentioned
+      - GCA temporal is 3 following generalized score despite temporal atrophy being implied
+      - GCA parietal is 3 due to "meest uitgesproken in de pariëtale kwabben" with overall GCA 3
+      - GCA occipital is 3 from occipital lobe prominence mentioned alongside parietal
+      - GCA overall is 3 per explicit "GCA-score wordt geschat op 3"
+      - Any brain infarct is 1 because of the chronic cerebellar infarct
+      - Total number of brain infarcts is missing as only "een klein chronisch cerebellair infarct" is quantified
+      - Cortical infarcts are 0 with no mention of cortical involvement
+      - Number of cortical infarcts is missing without explicit cortical assessment
+      - Lacunes infarcts are 0 as lacunar infarcts aren't reported
+      - Number of lacunar infarcts is missing without lacunar evaluation
+      - Cerebellar infarcts are 1 confirmed by "klein chronisch cerebellair infarct"
+      - Number of cerebellar infarcts is 1 since one is specifically described
+      - Splinter infarcts are 0 with no report reference
+      - DWI abnormalities are 0 based on "geen acute ischemie gezien bij DWI"
+      - SWI abnormalities are 1 from "meerdere lobaire microbloedingen" on SWI
+      - Presence of Microbleeds is 1 matching SWI findings
+      - Total number of microbleeds is missing despite confirmed presence (no exact count)
+      - Presence of siderosis is 0 as it's not mentioned in the report
+    output: |
+      ```json
+      {
+        "Fazekas score": 3,
+        "MTA left": 4,
+        "MTA right": 4,
+        "GCA frontal": 3,
+        "GCA temporal": 3,
+        "GCA parietal": 3,
+        "GCA occipital": 3,
+        "GCA overall": 3,
+        "Any brain infarct": 1,
+        "Total number of brain infarcts": "missing",
+        "Cortical infarcts": 0,
+        "Number of cortical infarcts": "missing",
+        "Lacunes infarcts": 0,
+        "Number of lacunar infarcts": "missing",
+        "Cerebellar infarcts": 1,
+        "Number of cerebellar infarcts": 1,
+        "Splinter infarcts": 0,
+        "DWI abnormalities": 0,
+        "SWI abnormalities": 1,
+        "Presence of Microbleeds": 1,
+        "Total number of microbleeds": "missing",
+        "Presence of siderosis": 0
+      }
+      ```
+  - input: |
+      anonymized for github
+    reasoning: |
+      - Fazekas score is 3 based on "uitgebreide confluente witte stof hyperintensiteiten... Fazekas-score van 3"
+      - MTA left scores 3 from "duidelijke bilaterale mediale temporaalkwab-atrofie (MTA 3)"
+      - MTA right also scores 3 as the atrophy is bilateral
+      - GCA frontal is 2 using the overall GCA score since frontal isn't specifically mentioned
+      - GCA temporal is 2 following generalized score despite temporal atrophy being present
+      - GCA parietal is 2 due to "prominenter in de pariëtale regio's" with overall GCA 2
+      - GCA occipital is 2 from posterior microbleeds suggesting occipital involvement
+      - GCA overall is 2 per "diffuus corticaal volumeverlies... (GCA 2)"
+      - Any brain infarct is 1 because of the old cortical infarct
+      - Total number of brain infarcts is missing as only one infarct is described without total count
+      - Cortical infarcts are 1 confirmed by "oud corticaal infarct in de rechter pariëtale regio"
+      - Number of cortical infarcts is 1 since one is specifically described
+      - Lacunes infarcts are 0 as lacunar infarcts aren't reported
+      - Number of lacunar infarcts is missing without lacunar evaluation
+      - Cerebellar infarcts are 0 with no cerebellar findings mentioned
+      - Number of cerebellar infarcts is missing without cerebellar assessment
+      - Splinter infarcts are missing with no report reference
+      - DWI abnormalities are 0 based on "zonder tekenen van recente ischemie op DWI"
+      - SWI abnormalities are 1 from "talrijke corticale en subcorticale microbloedingen" on SWI
+      - Presence of Microbleeds is 1 matching SWI findings of numerous microbleeds
+      - Total number of microbleeds is missing despite "talrijke" description (no exact count)
+      - Presence of siderosis is 0 as it's not mentioned in the report
+    output: |
+      ```json
+      {
+        "Fazekas score": 3,
+        "MTA left": 3,
+        "MTA right": 3,
+        "GCA frontal": 2,
+        "GCA temporal": 2,
+        "GCA parietal": 2,
+        "GCA occipital": 2,
+        "GCA overall": 2,
+        "Any brain infarct": 1,
+        "Total number of brain infarcts": "missing",
+        "Cortical infarcts": 1,
+        "Number of cortical infarcts": 1,
+        "Lacunes infarcts": 0,
+        "Number of lacunar infarcts": "missing",
+        "Cerebellar infarcts": 0,
+        "Number of cerebellar infarcts": "missing",
+        "Splinter infarcts": "missing",
+        "DWI abnormalities": 0,
+        "SWI abnormalities": 1,
+        "Presence of Microbleeds": 1,
+        "Total number of microbleeds": "missing",
+        "Presence of siderosis": 0
+      }
+      ```

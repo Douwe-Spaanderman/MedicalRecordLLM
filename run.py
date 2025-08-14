@@ -5,6 +5,9 @@ from parser import VLLMReportParser
 from adapters import DataFrameAdapter, JsonAdapter
 import yaml
 import json
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def load_config(config_path: str) -> dict:
     """Load configuration from YAML file"""
@@ -28,26 +31,26 @@ def main():
         help="Output file path"
     )
     parser.add_argument(
-        "-q",
-        "--query-config",
+        "-pm",
+        "--prompt-method",
         required=True,
+        choices=["ZeroShot", "OneShot", "FewShot", "CoT", "SelfConsistency", "PromptGraph"],
         type=str,
-        help="Path to YAML config for query definitions"
+        help="prompting method"
     )
     parser.add_argument(
-        "-p",
+        "-pc",
+        "--prompt-config",
+        required=True,
+        type=str,
+        help="Path to YAML config for prompt definitions"
+    )
+    parser.add_argument(
+        "-pa",
         "--params-config",
         default="config_parameters.yaml",
         type=str,
         help="Path to YAML config for model parameters"
-    )
-    parser.add_argument(
-        "-g",
-        "--gpus",
-        required=False,
-        type=int,
-        default=2,
-        help="Number of GPUs to use for tensor parallelism",
     )
     parser.add_argument(
         "-f", "--format",
@@ -57,9 +60,22 @@ def main():
         help="Input file format"
     )
     parser.add_argument(
+        "-u", 
+        "--base-url",
+        default="http://localhost:8000/v1",
+        type=str,
+        help="Base URL for the LLM API"
+    )
+    parser.add_argument(
+        "--api-key",
+        default="DummyAPIKey",
+        type=str,
+        help="API key for the LLM service (if required)"
+    )
+    parser.add_argument(
         "--text-key",
         default="Text",
-        help="Key containing text in JSON (default: 'text')"
+        help="Key containing text in JSON (default: 'Text')"
     )
     parser.add_argument(
         "--report-type-key",
@@ -69,17 +85,45 @@ def main():
     parser.add_argument(
         "--text-col",
         default="Text",
-        help="Text column in CSV (default: 'presentedForm_data')"
+        help="Text column in CSV (default: 'Text')"
     )
     parser.add_argument(
         "--patient-id-col",
         default="patientID",
-        help="Patient ID column in CSV (default: 'patientId')"
+        help="Patient ID column in CSV (default: 'patientID')"
     )
     parser.add_argument(
         "--save-raw",
         action="store_true",
         help="Save raw model output to a file",
+    )
+    parser.add_argument(
+        "-b",
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Optional internal batch size for processing reports (default: None)"
+    )
+    parser.add_argument(
+        "-t",
+        "--timeout",
+        type=int,
+        default=60,
+        help="Timeout for each request in seconds (default: 60)"
+    )
+    parser.add_argument(
+        "-mc",
+        "--max-concurrent",
+        type=int,
+        default=32,
+        help="Maximum number of concurrent requests (default: 32)"
+    )
+    parser.add_argument(
+        "-se",
+        "--select_example",
+        type=int,
+        default=None,
+        help="1-based index of the example to use (only for example-based prompt methods) (default: None)"
     )
     parser.add_argument(
         "-r",
@@ -89,32 +133,41 @@ def main():
         default=None,
         help="Path to the regex patterns to extract (should be .json file). This can be used to use existing structured data in the reports",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Do you want to print intermediates, such as raw prompts etc. (Nice for debugging but slows down workflow quite a bit)"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Do you want to do a dry run, trying out the whole workflow without running the LLM"
+    )
 
     args = parser.parse_args()
     
     # Load model parameters from config file
     params_config = load_config(args.params_config)
-    
-    # Model full path from config
-    model_path = params_config['model']
 
-    # Load query configuration
-    query_config = load_config(args.query_config)
+    # Load prompt configuration
+    prompt_config = load_config(args.prompt_config)
 
     # Initialize parser
     report_parser = VLLMReportParser(
-        model=model_path,
-        query_config=query_config,
-        gpus=args.gpus,
+        prompt_config=prompt_config,
+        params_config=params_config,
+        base_url=args.base_url,
+        api_key=args.api_key,
+        prompt_method=args.prompt_method,
+        batch_size=args.batch_size,
+        timeout=args.timeout,
+        max_concurrent=args.max_concurrent,
+        select_example=args.select_example,
         patterns_path=args.regex,
-        max_model_len=params_config.get('max_model_len', 2048),
-        max_tokens=params_config.get('max_tokens', None),
-        temperature=params_config.get('temperature', 0.3),
-        top_p=params_config.get('top_p', 0.9),
-        repetition_penalty=params_config.get('repetition_penalty', 1.0),
-        max_attempts= params_config.get('max_attempts', 1),
-        update_config=params_config.get('update_config', None),
-        save_raw_output=args.save_raw
+        save_raw_output=args.save_raw,
+        dry_run=args.dry_run,
+        verbose=args.verbose,
     )
 
     # Initialize appropriate adapter
@@ -124,7 +177,6 @@ def main():
             df=df,
             report_type_column=args.report_type_key,
             text_column=args.text_col,
-            report_type_filter=report_parser.report_type,
             patient_id_column=args.patient_id_col
         )
     else:  # json
@@ -139,13 +191,17 @@ def main():
     
     # Save output
     output_path = Path(args.output)
-    if args.format == "csv":
-        result.to_csv(output_path, index=False)
+    if not args.dry_run:
+        if args.format == "csv":
+            result.to_csv(output_path, index=False)
+        else:
+            with open(output_path, 'w') as f:
+                json.dump(result, f, indent=2)
+        
+        logging.info(f"[Saving] Results saved to {output_path}")
     else:
-        with open(output_path, 'w') as f:
-            json.dump(result, f, indent=2)
-    
-    print(f"Results saved to {output_path}")
+        logging.info(f"[Dry Run] Results would be saved to {output_path}")
+
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,353 @@
+field_instructions:
+  - name: "Primary melanoma"
+    type: "string"
+    options:
+      - "Yes"
+      - "No"
+      - "Not specified"
+    default: "Not specified"
+    chain_order: 1
+    constraints: "Determination of whether this is a primary melanoma case"
+
+  - name: "Report a revision"
+    type: "string"
+    options:
+      - "Yes"
+      - "No"
+      - "Not specified"
+    default: "Not specified"
+    chain_order: 1
+    constraints: "Indicates if this report is a revision of a previous report"
+
+  # Fields conditional on Primary melanoma = "Yes"
+  - name: "Multiple primary melanoma"
+    type: "string"
+    options:
+      - "Yes"
+      - "No"
+      - "Not specified"
+    default: "Not specified"
+    chain_order: 2
+    constraints: |
+      Only applicable if Primary melanoma is "Yes".
+      Indicates presence of multiple primary melanomas.
+    depends_on:
+      field: "Primary melanoma"
+      values: ["Yes"]
+
+  - name: "In situ melanoma"
+    type: "string"
+    options:
+      - "Yes"
+      - "No"
+      - "Not specified"
+    default: "Not specified"
+    chain_order: 2
+    constraints: |
+      "Indicates if melanoma is in situ (non-invasive)"
+    depends_on:
+      field: "Primary melanoma"
+      values: ["Yes"]
+
+  - name: "Breslow thickness"
+    type: "float"
+    constraints: |
+      Measured thickness of melanoma in millimeters.
+      Must be between 0.0 and 400.0 if specified.
+    default: "Not specified"
+    chain_order: 2
+    depends_on:
+      field: "Primary melanoma"
+      values: ["Yes"]
+
+  - name: "Ulceration"
+    type: "string"
+    options:
+      - "Yes"
+      - "No"
+      - "Not specified"
+    default: "Not specified"
+    chain_order: 2
+    constraints: "Presence or absence of ulceration"
+    depends_on:
+      field: "Primary melanoma"
+      values: ["Yes"]
+
+  - name: "Location of melanoma"
+    type: "string"
+    options:
+      - "Head and Neck"
+      - "Trunk"
+      - "Upper extremity"
+      - "Lower extremity"
+      - "Not specified"
+    default: "Not specified"
+    chain_order: 2
+    constraints: "Anatomical location of the primary melanoma"
+    depends_on:
+      field: "Primary melanoma"
+      values: ["Yes"]
+
+  - name: "Subtype of melanoma"
+    type: "string"
+    options:
+      - "superficial spreading melanoma"
+      - "Nodular melanoma"
+      - "Acral melanoma"
+      - "Desmoplastic melanoma"
+      - "Not specified"
+    default: "Not specified"
+    chain_order: 2
+    constraints: "Histological subtype classification"
+    depends_on:
+      field: "Primary melanoma"
+      values: ["Yes"]
+
+  - name: "Microsatellites present"
+    type: "string"
+    options:
+      - "Yes"
+      - "No"
+      - "Not specified"
+    default: "Not specified"
+    chain_order: 2
+    constraints: "Presence of microsatellite lesions"
+    depends_on:
+      field: "Primary melanoma"
+      values: ["Yes"]
+
+  - name: "Mitosis described"
+    type: "string"
+    options:
+      - "Yes"
+      - "No"
+      - "Not specified"
+    default: "Not specified"
+    chain_order: 2
+    constraints: "Whether mitotic activity is described in report"
+    depends_on:
+      field: "Primary melanoma"
+      values: ["Yes"]
+
+  - name: "Mitosis count"
+    type: "float"
+    constraints: |
+      Number of mitoses per square millimeter.
+      Only applicable if 'Mitosis described' is "Yes".
+      Must be between 0.0 and 100.0 if specified.
+    default: "Not specified"
+    chain_order: 3
+    depends_on:
+      field: "Mitosis described"
+      values: ["Yes"]
+
+  - name: "Lymphatic invasion"
+    type: "string"
+    options:
+      - "Yes"
+      - "No"
+      - "Not specified"
+    default: "Not specified"
+    chain_order: 2
+    constraints: "Presence of lymphatic vessel invasion"
+    depends_on:
+      field: "Primary melanoma"
+      values: ["Yes"]
+
+  # Fields conditional on Primary melanoma = "No"
+  - name: "Specimen type"
+    type: "string"
+    options:
+      - "Both"
+      - "SLNB"
+      - "WLE"
+      - "Not specified"
+    default: "Not specified"
+    chain_order: 4
+    constraints: |
+      Type of specimen when not primary melanoma.
+      SLNB = Sentinel Lymph Node Biopsy
+      WLE = Wide Local Excision
+    depends_on:
+      field: "Primary melanoma"
+      values: ["No"]
+
+  - name: "SLNB metastases present"
+    type: "string"
+    options:
+      - "Yes"
+      - "No"
+      - "Not specified"
+    default: "Not specified"
+    chain_order: 5
+    constraints: |
+      Presence of metastases in sentinel lymph node.
+      Only applicable if specimen includes SLNB.
+    depends_on:
+      field: "Specimen type"
+      values: ["Both", "SLNB"]
+
+  - name: "SLNB tumour burden"
+    type: "float"
+    constraints: |
+      Size of metastatic deposit in sentinel node in mm.
+      Only applicable if SLNB metastases present is "Yes".
+      Must be between 0.01 and 200.00 if specified.
+    default: "Not specified"
+    chain_order: 6
+    depends_on:
+      field: "SLNB metastases present"
+      values: ["Yes"]
+
+  - name: "Quality Check"
+    type: "string"
+    constraints: |
+      Evaluate the report for logical consistency and medical plausibility.
+      Flag unclear or contradictory findings.
+      Briefly explain any quality concerns identified.
+    default: "No issues detected"
+    chain_order: 99
+
+task: |
+  Extract information into this exact JSON structure:
+  ```json
+  {
+      "Primary melanoma": "",
+      "Report a revision": "",
+      "Multiple primary melanoma": "",
+      "In situ melanoma": "",
+      "Breslow thickness": "",
+      "Ulceration": "",
+      "Location of melanoma": "",
+      "Subtype of melanoma": "",
+      "Microsatellites present": "",
+      "Mitosis described": "",
+      "Mitosis count": "",
+      "Lymphatic invasion": "",
+      "Specimen type": "",
+      "SLNB metastases present": "",
+      "SLNB tumour burden": "",
+      "Quality Check": ""
+  }
+  ```
+examples:
+  - input: |
+      anonymized for github
+    reasoning: |
+      - Clear diagnosis of "maligne melanoom" (malignant melanoma) establishes this as a primary melanoma case
+      - No indication this is a revised report or second opinion
+      - Report doesn't mention multiple primary melanomas (only describes one lesion)
+      - Not an in situ melanoma since there's dermal invasion (Breslow 3mm)
+      - Breslow thickness explicitly reported as 3 mm in the conclusion
+      - Ulceration is explicitly mentioned in both conclusion and microscopy
+      - Location clearly specified as left upper arm ("bovenarm links")
+      - Subtype identified as "spoelcellig" (spindle cell melanoma)
+      - Microsatellites not present ("Geen satellitose")
+      - Mitotic activity clearly described ("meer dan 1 mitose per vierkante millimeter")
+      - Mitosis count could be recorded as >1/mm² but exact count not provided
+      - Lymphatic invasion not present ("Geen angio-invasieve groei")
+      - Specimen is an excision ("huidexcisie") though not explicitly labeled as such
+      - Sentinel node procedure recommended but not yet performed (no SLNB results)
+      - No SLNB tumor burden reported since biopsy wasn't performed yet
+      - All findings are consistent: spindle cell morphology, ulceration, high mitotic rate, and positive deep margin all support malignant diagnosis
+    output: |
+      ```json
+      {
+        "Primary melanoma": "Yes",
+        "Report a revision": "Not specified",
+        "Multiple primary melanoma": "Not specified",
+        "In situ melanoma": "No",
+        "Breslow thickness": 3.0,
+        "Ulceration": "Yes",
+        "Location of melanoma": "Upper extremity",
+        "Subtype of melanoma": "spindle cell melanoma",
+        "Microsatellites present": "No",
+        "Mitosis described": "Yes",
+        "Mitosis count": ">1",
+        "Lymphatic invasion": "No",
+        "Specimen type": "Excision",
+        "SLNB metastases present": "Not specified",
+        "SLNB tumour burden": "Not specified",
+        "Quality Check": "No issues detected - Diagnosis consistent across all reported features: spindle cell morphology, ulceration, high mitotic rate, and positive deep margin"
+      }
+      ```
+  - input: |
+      anonymized for github
+    reasoning: |
+      - The report clearly states there's insufficient evidence for melanoma ("onvoldoende argumenten voor melanoom") and gives a SAMPUS diagnosis instead
+      - There's no mention of this being a revised report or second opinion
+      - Multiple primary melanomas aren't mentioned or relevant for this non-melanoma case
+      - In situ status isn't applicable since this isn't melanoma
+      - Breslow thickness isn't measured or reported for SAMPUS lesions
+      - Ulceration isn't described in the report for this non-melanoma case
+      - While the location is noted as right thigh ("rechterbovenbeen"), we don't record this as it's not melanoma
+      - No melanoma subtype is applicable for SAMPUS diagnosis
+      - Microsatellites aren't mentioned in the histological description
+      - The report explicitly states no dermal mitoses are seen ("Dermale mitosen worden niet gezien")
+      - Mitosis count isn't applicable when no mitoses are described
+      - Lymphatic invasion isn't mentioned in the report
+      - The specimen type isn't explicitly stated (though it's likely an excision based on context)
+      - Sentinel lymph node biopsy isn't relevant for this non-melanoma case
+      - Tumor burden measurement doesn't apply without SLNB being performed
+      - The diagnosis is internally consistent: mild atypia, no dermal mitoses, partial PRAME positivity, and negative TERT promoter mutation all support SAMPUS
+    output: |
+      ```json
+      {
+        "Primary melanoma": "No",
+        "Report a revision": "Not specified",
+        "Multiple primary melanoma": "Not specified",
+        "In situ melanoma": "Not specified",
+        "Breslow thickness": "Not specified",
+        "Ulceration": "Not specified",
+        "Location of melanoma": "Not specified",
+        "Subtype of melanoma": "Not specified",
+        "Microsatellites present": "Not specified",
+        "Mitosis described": "No",
+        "Mitosis count": "Not specified",
+        "Lymphatic invasion": "Not specified",
+        "Specimen type": "Not specified",
+        "SLNB metastases present": "Not specified",
+        "SLNB tumour burden": "Not specified",
+        "Quality Check": "No issues detected - SAMPUS diagnosis consistent with reported histology (mild atypia, no dermal mitoses) and molecular findings (no TERT mutation)"
+      }
+      ```
+  - input: |
+      anonymized for github
+    reasoning: |
+      - The report describes metastatic melanoma in lymph nodes, not a primary lesion
+      - No indication this is a revised report or addendum
+      - Multiple primary melanoma status cannot be determined from this metastatic report
+      - In situ component isn't applicable for metastatic lesions
+      - Breslow thickness only applies to primary tumors which aren't described here
+      - Ulceration status would apply to primary tumor which isn't mentioned
+      - Primary tumor location isn't specified in this nodal metastasis report
+      - Subtype shows mixed features ("deels epitheloïd, deels spoelcellig"), but should be not specified because not primary melanoma
+      - Microsatellites aren't mentioned in this metastatic context
+      - Mitotic activity isn't described
+      - Mitotic activity isn't quantified
+      - Lymphatic invasion isn't applicable for intranodal metastases
+      - Specimen is clearly an axillary lymph node dissection ("Okselklierdissectie")
+      - One large lymph node contains metastasis (1/20 nodes positive)
+      - Massive tumor burden with 8.5 cm metastatic focus
+      - No issues detected, pigment (melanin) visible in tumor cells supports melanoma diagnosis
+    output: |
+      ```json
+      {
+        "Primary melanoma": "No",
+        "Report a revision": "Not specified",
+        "Multiple primary melanoma": "Not specified",
+        "In situ melanoma": "Not specified",
+        "Breslow thickness": "Not specified",
+        "Ulceration": "Not specified",
+        "Location of melanoma": "Not specified",
+        "Subtype of melanoma": "Not specified",
+        "Microsatellites present": "Not specified",
+        "Mitosis described": "Not specified",
+        "Mitosis count": "Not specified",
+        "Lymphatic invasion": "Not specified",
+        "Specimen type": "SLNB",
+        "SLNB metastases present": "Yes",
+        "SLNB tumour burden": 85.0,
+        "Quality Check": "No issues - Massive nodal metastasis (8.5 cm) showing mixed epithelioid/spindle features with melanin pigment, 1/20 nodes involved"
+      }
+      ```

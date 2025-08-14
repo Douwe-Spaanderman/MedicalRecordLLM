@@ -160,8 +160,12 @@ coverage
 
 data/*
 venv/*
+env/*
 
 .vscode/*
 *__pycache__*
 
-experiments/*
+experiment/*
+setup.sh
+slurm/*
+todo.txt
