@@ -10,7 +10,7 @@ from matplotlib.text import Text
 import matplotlib.font_manager as fm
 
 # --- Custom Style Parameters ---
-palette = ['#66c2a5','#fc8d62','#8da0cb', '#e78ac3']
+palette = ['#66c2a5','#fc8d62','#8da0cb', '#a6d854', '#e78ac3']
 linewidth = 1
 fontsize = 18
 subfontsize = 16
@@ -24,6 +24,7 @@ category_colors = {
     'large': '#66c2a5',
     'medium': '#fc8d62',
     'small': '#8da0cb',
+    'tiny': '#a6d854',
     'specialized': '#e78ac3'
 }
 
@@ -38,15 +39,18 @@ custom_params = {
 sns.set_theme(style=style, rc=custom_params, palette=sns.color_palette(palette))
 
 model_sizes = {
-    'Llama3-Med42-70B': {'category': 'specialized', 'size': 70}, 
-    'Llama-3_3-Nemotron-Super-49B-v1': {'category': 'medium', 'size': 49},
-    'Llama-4-Scout-17B-16E': {'category': 'medium', 'size': 109}, 
-    'Qwen2.5-72B-Instruct': {'category': 'medium', 'size': 72}, 
-    'Llama3-OpenBioLLM-70B': {'category': 'specialized', 'size': 70}, 
-    'medgemma-27b-it': {'category': 'specialized', 'size': 27}, 
-    'gemma-3-27b-it': {'category': 'small', 'size': 27},
-    'Mistral-Small-3.1-24B-Instruct-2503': {'category': 'small', 'size': 24}, 
-    'DeepSeek-R1-0528-Qwen3-8B': {'category': 'small', 'size': 8}
+    'Llama3-Med42-70B': {'category': 'specialized', 'size': 70, 'name': 'Llama-3 Med42 70B'}, 
+    'Llama-3_3-Nemotron-Super-49B-v1': {'category': 'medium', 'size': 49, 'name': 'Llama-3.3 Nemotron Super 49B v1'},
+    'Llama-4-Scout-17B-16E': {'category': 'medium', 'size': 109, 'name': 'Llama-4 Scout 17B 16E'}, 
+    'Qwen2.5-72B-Instruct': {'category': 'medium', 'size': 72, 'name': 'Qwen2.5 72B Instruct'}, 
+    'Llama3-OpenBioLLM-70B': {'category': 'specialized', 'size': 70, 'name': 'Llama-3 OpenBioLLM 70B'}, 
+    'medgemma-27b-it': {'category': 'specialized', 'size': 27, 'name': 'MedGemma 27B IT'}, 
+    'gemma-3-27b-it': {'category': 'small', 'size': 27, 'name': 'Gemma 3 27B IT'},
+    'Mistral-Small-3.1-24B-Instruct-2503': {'category': 'small', 'size': 24, 'name': 'Mistral Small 3.1 24B Instruct 2503'}, 
+    'DeepSeek-R1-0528-Qwen3-8B': {'category': 'small', 'size': 8, 'name': 'DeepSeek R1 0528 Qwen3 8B'},
+    'gemma-3-4b-it': {'category': 'tiny', 'size': 4, 'name': 'Gemma 3 4B IT'},
+    'Qwen3-1.7B': {'category': 'tiny', 'size': 1.7, 'name': 'Qwen3 1.7B'},
+    'DeepSeek-R1-Distill-Qwen-1.5B': {'category': 'tiny', 'size': 1.5, 'name': 'DeepSeek R1 Distill Qwen 1.5B'},
 }
 
 use_case_order = [
@@ -101,7 +105,7 @@ def create_figures(
     
     # Order models by category and size
     def get_model_order(model_name):
-        category_order = {'medium': 0, 'small': 1, 'specialized': 2}
+        category_order = {'medium': 0, 'small': 1, 'tiny': 2, 'specialized': 3}
         return (category_order[model_sizes[model_name]['category']], -model_sizes[model_name]['size'])
     
     model_order = sorted(model_sizes.keys(), key=get_model_order)
@@ -145,7 +149,10 @@ def create_figures(
         plt.savefig(root_dir / f"Use_Case_{use_case}" / "output" / "performance.png", bbox_inches='tight', pad_inches=0.5, dpi=300)
 
     # Combined plot
-    data = data[data["Rank"] == 1]
+    zero = data[data["Prompting Strategy"] == "ZeroShot"].reset_index(drop=True)
+    data = data[data["Rank"] == 1].reset_index(drop=True)
+    idx = data.groupby(["Use_Case", "LLM"])["Performance"].idxmax()
+    data = data.loc[idx]
     if not data.empty:
         num_models = data["LLM"].nunique()
         num_use_cases = len(available_use_cases)
@@ -160,6 +167,7 @@ def create_figures(
             x="Use_Case",
             y="Performance",
             hue="LLM",
+            baseline=zero,
             ylabel="Micro-Average Score" if all(data["Metric"] == "micro_avg") else \
             "Macro-Average Score" if all(data["Metric"] == "macro_avg") else \
             "Micro- and Macro-Average Score",
@@ -199,12 +207,12 @@ def create_custom_legend(fig):
     legend_ax.set_axis_off()
     
     # Create legend elements
-    col_width = 0.3
-    row_height = 0.08
+    col_width = 0.25
+    row_height = 0.2
     start_x = 0.1
-    start_y = 0.9
+    start_y = 1.1
     
-    for col, category in enumerate(['medium', 'small', 'specialized']):
+    for col, category in enumerate(['medium', 'small', 'tiny', 'specialized']):
         if category not in categories:
             continue
         
@@ -236,7 +244,7 @@ def create_custom_legend(fig):
             # Add model label
             legend_ax.text(
                 x_pos + 0.03, y_pos,
-                model,
+                model_sizes[model]['name'],
                 ha='left', va='center',
                 fontsize=10,
                 transform=legend_ax.transAxes
@@ -250,6 +258,7 @@ def plot_barplot(
     x: str,
     y: str,
     hue: Optional[str] = None,
+    baseline: Optional[pd.DataFrame] = None,
     ylabel: str = "",
     xlabel: str = "",
     wraptext: bool = True,
@@ -285,6 +294,20 @@ def plot_barplot(
         palette=palette,
         hue_order=data[hue].unique()  # Maintain the order we established
     )
+
+    if baseline is not None:
+        sns.barplot(
+            x=x,
+            y=y,
+            hue=hue,
+            data=baseline,
+            ax=ax,
+            width=barwidth,
+            palette=palette,
+            hatch='/',
+            alpha=0.5,
+            hue_order=baseline[hue].unique()
+        )
 
     if ci_lower and ci_upper:
         if hue:
