@@ -39,6 +39,7 @@ class ExperimentRunner:
         vllm_timeout: int = 600,
         base_url: str = "http://localhost:8000/v1/",
         balanced_accuracy: bool = False,
+        exclude_default: bool = False,
         measurement_run: bool = False,
         dry_run: bool = False,
     ):
@@ -60,6 +61,7 @@ class ExperimentRunner:
         self.vllm_timeout = vllm_timeout
         self.base_url = base_url
         self.balanced_accuracy = balanced_accuracy
+        self.exclude_default = exclude_default
         self.measurement_run = measurement_run
         self.dry_run = dry_run
 
@@ -337,6 +339,8 @@ class ExperimentRunner:
                 "--bootstrap", "1000",
                 "--balanced-accuracy"
             ])
+        if self.exclude_default:
+            command.append("--exclude-default")
 
         if self.dry_run:
             self.logger.info("[Dry Run] Would calculate performance with command: " + " ".join(command))
@@ -572,6 +576,11 @@ if __name__ == "__main__":
         help="Use balanced accuracy and macro average for performance calculation."
     )
     parser.add_argument(
+        "--exclude-default-in-evaluation",
+        action="store_true",
+        help="Exclude entries with default values in ground truth from performance calculations."
+    )
+    parser.add_argument(
         "--measurement-run", action="store_true", help="Perform only measurement without prompting llm."
     )
     parser.add_argument(
@@ -597,6 +606,7 @@ if __name__ == "__main__":
         vllm_timeout=args.vllm_timeout,
         base_url=args.vllm_base_url,
         balanced_accuracy=args.with_balanced_accuracy,
+        exclude_default=args.exclude_default_in_evaluation,
         measurement_run=args.measurement_run,
         dry_run=args.dry_run,
     )

@@ -100,7 +100,8 @@ def calculate_results(
     sentence_model: SentenceTransformer, 
     weights: Optional[List[int]] = None,
     n_bootstrap: int = 1000,
-    use_balanced_accuracy: bool = False
+    use_balanced_accuracy: bool = False,
+    exclude_default: bool = False
 ) -> pd.DataFrame:    
     """
     Calculate performance metrics comparing prediction against ground truth.
@@ -113,6 +114,7 @@ def calculate_results(
         weights (Optional[List[int]]): Weights for each field used for micro averaging.
         n_bootstrap (int): Number of bootstrap samples for CI; if <=1, skip bootstrapping.
         use_balanced_accuracy (bool): If True, use balanced accuracy for categorical/binary fields instead of normal accuracy.
+        exclude_default (bool): If True, exclude entries with default values in ground truth from calculations.
     
     Returns:
         pd.DataFrame: DataFrame containing calculated metrics for each field plus micro average.
@@ -144,6 +146,17 @@ def calculate_results(
                 ) else x
             )
 
+        # Exclude default values if specified
+        hallucinations = "N/A"
+        if exclude_default:
+            mask = ground_truth[field] != default_value
+
+            # Calculate hallucinations (i.e. ground truth is default but prediction is not)
+            hallucinations = ((ground_truth[field] == default_value) & (prediction[field] != default_value)).sum()
+
+            prediction = prediction[mask].reset_index(drop=True)
+            ground_truth = ground_truth[mask].reset_index(drop=True)
+
         scores = None
         metric_type = None
 
@@ -168,6 +181,10 @@ def calculate_results(
                     for p, g in zip(prediction[field], ground_truth[field])
                 ]).to_numpy()
                 metric_type = "semantic_similarity"
+
+        elif type_value == "string_exact_match":
+            scores = (prediction[field] == ground_truth[field]).astype(int).to_numpy()
+            metric_type = "accuracy"
 
         elif type_value in {"number", "float"}:
             prediction[field] = pd.to_numeric(prediction[field], errors='coerce')
@@ -228,7 +245,8 @@ def calculate_results(
             "ci_low": ci[0],
             "ci_high": ci[1],
             "weight": field_weight,
-            "scores": scores
+            "scores": scores,
+            "hallucinations": hallucinations if exclude_default else None
         })
 
     if results:
@@ -264,7 +282,8 @@ def calculate_results(
                 "ci_low": ci_macro[0],
                 "ci_high": ci_macro[1],
                 "weight": None,
-                "scores": None
+                "scores": None,
+                "hallucinations": None
             }
         else:
             # --- Micro average ---
@@ -290,7 +309,8 @@ def calculate_results(
                 "ci_low": ci_micro[0],
                 "ci_high": ci_micro[1],
                 "weight": None,
-                "scores": None
+                "scores": None,
+                "hallucinations": None
             }
 
         return pd.concat([results_df, pd.DataFrame([avg_results])], ignore_index=True)
@@ -304,7 +324,8 @@ def process_results(
     scoring_weights: Optional[List[int]] = None, 
     output_file: Optional[str] = None,
     n_bootstrap: int = 1000,
-    use_balanced_accuracy: bool = False
+    use_balanced_accuracy: bool = False,
+    exclude_default: bool = False
     ) -> None:
     """
     Process LLM output and compare it against ground truth.
@@ -318,6 +339,7 @@ def process_results(
         output_file (Optional[str]): Path to save the results output file.
         n_bootstrap (int): Number of bootstrap samples for CI; if <=1, skip bootstrapping.
         use_balanced_accuracy (bool): If True, use balanced accuracy for categorical/binary fields instead of normal accuracy.
+        exclude_default (bool): If True, exclude entries with default values in ground truth from calculations.
     """
     if isinstance(LLM_output, str):
         LLM_output = pd.read_csv(LLM_output, converters={"extracted_data": safe_literal_eval})
@@ -426,6 +448,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--balanced-accuracy", action="store_true", help="Do you want to calculate balanced accuracy instead of accuracy."
+    )
+    parser.add_argument(
+        "--exclude-default", action="store_true", help="Exclude entries with default values in ground truth from calculations."
     )
     parser.add_argument(
         "-w",
