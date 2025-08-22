@@ -154,6 +154,8 @@ class ExperimentRunner:
             model_name = model_config.get("model", model_config_path.stem).split("/")[-1]
             if self.vllm_server:
                 vllm_process = self.start_vllm_server(model_config)
+            else:
+                vllm_process = None
 
             try:
                 self.wait_for_vllm_ready(timeout=self.vllm_timeout)
