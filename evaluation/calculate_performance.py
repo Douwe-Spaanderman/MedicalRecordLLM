@@ -163,8 +163,8 @@ def calculate_results(
         if type_value in {"string", "binary", "boolean", "categorical", "categorical_number"}:
             if "options" in meta:
                 if type_value in {"binary", "boolean", "categorical_number"}:
-                    prediction[field] = pd.to_numeric(prediction[field], errors='coerce')
-                    ground_truth[field] = pd.to_numeric(ground_truth[field], errors='coerce')
+                    prediction[field] = pd.to_numeric(prediction[field], errors='coerce', downcast="float")
+                    ground_truth[field] = pd.to_numeric(ground_truth[field], errors='coerce', downcast="float")
                     prediction[field] = prediction[field].fillna(default_value).astype(str)
                     ground_truth[field] = ground_truth[field].fillna(default_value).astype(str)
 
@@ -187,15 +187,18 @@ def calculate_results(
             metric_type = "accuracy"
 
         elif type_value in {"number", "float"}:
-            prediction[field] = pd.to_numeric(prediction[field], errors='coerce')
-            ground_truth[field] = pd.to_numeric(ground_truth[field], errors='coerce')
+            prediction[field] = pd.to_numeric(prediction[field], errors='coerce', downcast="float")
+            ground_truth[field] = pd.to_numeric(ground_truth[field], errors='coerce', downcast="float")
             prediction[field] = prediction[field].fillna(default_value).astype(str)
             ground_truth[field] = ground_truth[field].fillna(default_value).astype(str)
             scores = (prediction[field] == ground_truth[field]).astype(int).to_numpy()
             metric_type = "accuracy"
 
         elif type_value == "list":
-            prediction[field] = prediction[field].apply(lambda x: x if isinstance(x, list) else [])
+            print(field)
+            prediction[field] = prediction[field].apply(
+                lambda x: [s for s in x if isinstance(s, str) and s.strip()] if isinstance(x, list) else []
+            )
             ground_truth[field] = ground_truth[field].apply(
                 lambda x: x if isinstance(x, list) else x.split(", ") if isinstance(x, str) else []
             )
