@@ -335,14 +335,14 @@ class ExperimentRunner:
             "-l", str(llm_output_path),
             "-p", str(self.prompt_config_path),
             "-o", str(perf_output_path),
+            "--bootstrap", "1000",
         ]
         if self.balanced_accuracy:
             command.extend([
-                "--bootstrap", "1000",
                 "--balanced-accuracy"
             ])
         if self.exclude_default:
-            command.append("--exclude-default")
+            command.append("--strict-metrics")
 
         if self.dry_run:
             self.logger.info("[Dry Run] Would calculate performance with command: " + " ".join(command))
