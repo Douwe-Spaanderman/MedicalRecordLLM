@@ -294,16 +294,30 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Parse LLM experiment logs")
-    parser.add_argument("--error-log", required=True, help="Path to error log file")
-    parser.add_argument("--output-log", required=True, help="Path to output log file")
+    parser.add_argument("--error-log", default=None, help="Path to error log file")
+    parser.add_argument("--output-log", default=None, help="Path to output log file")
     parser.add_argument("--output", default="experiment_data.json", help="Output JSON file path")
     
     args = parser.parse_args()
     
-    parser = LogParser(args.error_log, args.output_log)
-    parser.run(Path(args.output) / "log.json")
-    
-    analyzer = PerformanceAnalyzer(parser.experiment_data)
+    if not args.error_log or not args.output_log:
+        print("Error log and output log paths are not provided so only analyzing existing data.")
+        output = Path(args.output) / "log.json"
+        data = json.loads(output.read_text())
+        # Load as ExperimentData
+        data = {
+            model: {
+                strategy: [ThroughputRecord(**record) for record in records]
+                for strategy, records in strategies.items()
+            }
+            for model, strategies in data.items()
+        }
+        analyzer = PerformanceAnalyzer(data)
+    else:     
+        parser = LogParser(args.error_log, args.output_log)
+        parser.run(Path(args.output) / "log.json")
+        
+        analyzer = PerformanceAnalyzer(parser.experiment_data)
 
     summary = analyzer.compare_strategies()
     print("Summary Statistics:")
