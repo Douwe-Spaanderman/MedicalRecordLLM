@@ -1,4 +1,4 @@
-model: "Qwen/Qwen3-1.7B "
+model: "Qwen/Qwen3-1.7B"
 max_model_len: 64000
 max_tokens: 4096
 temperature: 0.6
