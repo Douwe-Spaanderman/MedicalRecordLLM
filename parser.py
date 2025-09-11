@@ -275,6 +275,8 @@ class ReasoningAndDynamicJSONParser(BaseOutputParser):
         if extracted_data is None:
             self._logger.error("Failed to parse JSON block or no valid JSON found.")
             reasoning = text.strip()
+            extracted_data = {}
+            print(reasoning)
 
         return {
             "raw_output": text,
@@ -1660,7 +1662,7 @@ class VLLMReportParser:
                     "patient": input_item["patient"],
                     "index": input_item["index"],
                     "result": llm_result,
-                    "status": "success" if llm_result.get('extracted_data') is not None else "failed",
+                    "status": "success" if llm_result.get('extracted_data') else "failed",
                     "report": input_item["report"]
                 } for input_item, llm_result in zip(chunk_inputs, results)]
             except asyncio.TimeoutError:
