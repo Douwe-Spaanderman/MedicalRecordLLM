@@ -28,6 +28,14 @@ category_colors = {
     'specialized': '#e78ac3'
 }
 
+prompting_strategy_markers = {
+    'ZeroShot': {"marker": ' ', 'name': 'Zero Shot'},
+    'OneShot': {"marker": 'v', 'name': 'One Shot', 'symbol': '▼'},
+    'FewShot': {"marker": 's', 'name': 'Few Shot', 'symbol': '■'},
+    'CoT': {"marker": '^', 'name': 'Chain-of-Thought', 'symbol': '▲'},
+    'SelfConsistency': {"marker": 'D', 'name': 'Self-Consistency', 'symbol': '◆'},
+    'PromptGraph': {"marker": 'o', 'name': 'Prompt Graph', 'symbol': '●'},
+}
 
 custom_params = {
     "axes.spines.right": False,
@@ -53,15 +61,15 @@ model_sizes = {
     'DeepSeek-R1-Distill-Qwen-1.5B': {'category': 'tiny', 'size': 1.5, 'name': 'DeepSeek R1 Distill Qwen 1.5B'},
 }
 
-use_case_order = [
-    "Liver",
-    "Alzheimer",
-    "STT_English",
-    "STT_Dutch",
-    "Melanoma",
-    "Colorectal",
-    "Unknown",
-]
+use_cases = {
+    "Liver": "Liver Tumors",
+    "Alzheimer": "Alzheimer's Disease",
+    "STT_English": "Soft Tissue Tumours (English)",
+    "STT_Dutch": "Soft Tissue Tumours (Dutch)",
+    "Melanoma": "Melanoma",
+    "Colorectal": "Colorectal Tumors",
+    "Unknown": "Unknown Use Case"
+}
 
 def get_model_color(model_name):
     """Get color for a model based on its category and size"""
@@ -74,8 +82,8 @@ def get_model_color(model_name):
     rgb = tuple(int(base_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
     
     # Calculate lightness factor based on size (larger models = darker)
-    max_size = max(info['size'] for info in model_sizes.values())
-    min_size = min(info['size'] for info in model_sizes.values())
+    max_size = max(info['size'] for info in model_sizes.values() if info['category'] == category)
+    min_size = min(info['size'] for info in model_sizes.values() if info['category'] == category)
     
     # Normalize size to 0-1 range (1 = largest)
     if max_size != min_size:
@@ -84,7 +92,7 @@ def get_model_color(model_name):
         norm_size = 0.5
     
     # Darken color based on size (larger models get darker)
-    factor = 0.7 + 0.3 * (1 - norm_size)  # Range from 0.7 to 1.0
+    factor = 0.8 + 0.2 * (1 - norm_size)  # Range from 0.7 to 0.9
     
     # Apply factor to each RGB component
     new_rgb = tuple(int(min(255, max(0, c * factor))) for c in rgb)
@@ -97,9 +105,11 @@ def create_figures(
     root_dir: Path
 ) -> None:
     # Filter use_case_order to only include cases present in data
-    available_use_cases = [uc for uc in use_case_order if uc in data['Use_Case'].unique()]
+    available_use_cases = [uc for uc in use_cases.keys() if uc in data['Use_Case'].unique()]
     
     # Order data by available use cases
+    data["Use_Case_mapped"] = data["Use_Case"].map(use_cases).fillna(data["Use_Case"])
+    data["Use_Case_mapped"] = pd.Categorical(data["Use_Case_mapped"], categories=[use_cases[uc] for uc in available_use_cases], ordered=True)
     data['Use_Case'] = pd.Categorical(data['Use_Case'], categories=available_use_cases, ordered=True)
     data = data.sort_values('Use_Case')
     
@@ -151,7 +161,7 @@ def create_figures(
     # Combined plot
     zero = data[data["Prompting Strategy"] == "ZeroShot"].reset_index(drop=True)
     data = data[data["Rank"] == 1].reset_index(drop=True)
-    idx = data.groupby(["Use_Case", "LLM"])["Performance"].idxmax()
+    idx = data.groupby(["Use_Case_mapped", "LLM"])["Performance"].idxmax()
     data = data.loc[idx]
     if not data.empty:
         num_models = data["LLM"].nunique()
@@ -164,7 +174,7 @@ def create_figures(
 
         ax = plot_barplot(
             data=data,
-            x="Use_Case",
+            x="Use_Case_mapped",
             y="Performance",
             hue="LLM",
             baseline=zero,
@@ -175,20 +185,23 @@ def create_figures(
             ci_lower="CI Low",
             ci_upper="CI High",
             ax=ax,
+            marker="Prompting Strategy",
             legend=False,
             category_coloring=True
         )
 
         # Create and position the custom legend
-        create_custom_legend(fig)
+        create_custom_legend(fig, marker=True)
 
         plt.savefig(root_dir / "performance.png", bbox_inches='tight', pad_inches=0.5, dpi=300)
 
-def create_custom_legend(fig):
+def create_custom_legend(fig, marker: bool = False) -> None:
     """Create and position a custom legend with category titles and model lists"""
-    from matplotlib.patches import Rectangle
+    from matplotlib.patches import Rectangle, PathPatch
     from matplotlib.text import Text
     import matplotlib.font_manager as fm
+    from matplotlib.markers import MarkerStyle
+    from matplotlib.path import Path
     
     # Group models by category and sort by size (descending)
     categories = {}
@@ -207,12 +220,13 @@ def create_custom_legend(fig):
     legend_ax.set_axis_off()
     
     # Create legend elements
-    col_width = 0.25
+    col_width = 0.20
     row_height = 0.2
-    start_x = 0.1
+    start_x = 0.05
     start_y = 1.1
+    title_spacing = 0.05
     
-    for col, category in enumerate(['medium', 'small', 'tiny', 'specialized']):
+    for col, category in enumerate(['medium', 'small', 'tiny', 'specialized']): # TODO missing 'large' category
         if category not in categories:
             continue
         
@@ -220,7 +234,7 @@ def create_custom_legend(fig):
         x_pos = start_x + col * col_width
         y_pos = start_y
         legend_ax.text(
-            x_pos, y_pos, 
+            x_pos, y_pos + title_spacing, 
             category.capitalize(), 
             fontproperties=fm.FontProperties(weight='bold'),
             ha='left', va='center'
@@ -249,6 +263,59 @@ def create_custom_legend(fig):
                 fontsize=10,
                 transform=legend_ax.transAxes
             )
+
+    # Add legend for prompting strategy markers (2 columns, 3 rows)
+    if marker:
+        marker_start_x = start_x + 4 * col_width + 0.
+        marker_col_width = (col_width / 2)
+        
+        # Add title for prompting strategies
+        legend_ax.text(
+            marker_start_x + (marker_col_width / 2) - 0.015, start_y + title_spacing,
+            "Prompting Strategies",
+            fontproperties=fm.FontProperties(weight='bold'),
+            ha='left', va='center'
+        )
+        
+        # Create prompting strategy markers in 2 columns
+        strategies = list(prompting_strategy_markers.items())
+        
+        for i, (strategy_key, strategy_info) in enumerate(strategies):
+            # Determine column and row position
+            col_idx = i // 3  # 0 for first column, 1 for second column
+            row_idx = i % 3   # 0, 1, 2 for rows
+            
+            x_pos = marker_start_x + col_idx * marker_col_width
+            y_pos = start_y - (row_idx + 1) * row_height
+
+            if strategy_key == 'ZeroShot':
+                patch = Rectangle(
+                    (x_pos, y_pos - 0.015),
+                    0.02, 0.02,
+                    facecolor='white',
+                    edgecolor='black',
+                    alpha=0.3,
+                    hatch='///',
+                    transform=legend_ax.transAxes
+                )
+                legend_ax.add_patch(patch)
+            else:
+                legend_ax.text(
+                    x_pos+0.01, y_pos,
+                    strategy_info['symbol'],
+                    ha='center', va='center',
+                    fontsize=10,
+                    transform=legend_ax.transAxes
+                )
+
+            # Add strategy label using the display name
+            legend_ax.text(
+                x_pos + 0.03, y_pos,
+                strategy_info['name'],
+                ha='left', va='center',
+                fontsize=10,
+                transform=legend_ax.transAxes
+            )
     
     # Adjust the main plot to make room for the legend
     fig.subplots_adjust(top=0.8)
@@ -265,6 +332,7 @@ def plot_barplot(
     ci_lower: Optional[str] = None,
     ci_upper: Optional[str] = None,
     ax: Optional[plt.Axes] = None,
+    marker: Optional[str] = None,
     legend: bool = False,
     category_coloring: bool = False
 ) -> plt.Axes:
@@ -276,6 +344,8 @@ def plot_barplot(
 
     if wraptext:
         data[x] = data[x].apply(lambda x: '\n'.join(textwrap.wrap(str(x), width=15)))
+        if baseline is not None:
+            baseline[x] = baseline[x].apply(lambda x: '\n'.join(textwrap.wrap(str(x), width=15)))
 
     if category_coloring and hue:
         # Get custom palette based on model categories and sizes
@@ -305,7 +375,7 @@ def plot_barplot(
             width=barwidth,
             palette=palette,
             hatch='/',
-            alpha=0.5,
+            alpha=0.3,
             hue_order=baseline[hue].unique()
         )
 
@@ -322,11 +392,17 @@ def plot_barplot(
                 yval = row[y]
                 yerr = [[yval - row[ci_lower]], [row[ci_upper] - yval]]
                 ax.errorbar(x=x_val, y=yval, yerr=yerr, fmt='none', ecolor=errorbar_color, capsize=4)
+                if marker:
+                    strategy = row[marker]
+                    ax.plot(x_val, yval, marker=prompting_strategy_markers[strategy]['marker'], color='black', markersize=8)
         else:
             for i, row in data.iterrows():
                 yval = row[y]
                 yerr = [[yval - row[ci_lower]], [row[ci_upper] - yval]]
                 ax.errorbar(x=i, y=yval, yerr=yerr, fmt='none', ecolor=errorbar_color, capsize=4)
+                if marker:
+                    strategy = row[marker]
+                    ax.plot(i, yval, marker=prompting_strategy_markers[strategy]['marker'], color='black', markersize=8)
                 
     ax.set_ylabel(ylabel, fontsize=subfontsize, labelpad=10)
     ax.set_xlabel(xlabel)
@@ -336,7 +412,7 @@ def plot_barplot(
     xmin = min(bar_positions)-0.2
     xmax = max(x + w for x, w in zip(bar_positions, bar_widths))+0.2
     ax.set_xlim(xmin, xmax)
-    ax.tick_params(axis='x', labelrotation=45, labelsize=tickfontsize)
+    ax.tick_params(axis='x', labelsize=tickfontsize)
     ax.tick_params(axis='y', labelsize=tickfontsize)
     ax.set_title("", fontsize=subfontsize)
     if not legend:

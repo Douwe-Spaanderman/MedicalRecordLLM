@@ -14,11 +14,11 @@ DeepSeek-R1-Qwen-1.5B:
   SelfConsistency:
     timeout: 480
     max_concurrent: 64
-  PromptChain:
+  PromptGraph:
     timeout: 2400
     max_concurrent: 256
 
-Llama-3.2-3B :
+Gemma-3-4B:
   ZeroShot:
     timeout: 240
     max_concurrent: 256
@@ -34,7 +34,7 @@ Llama-3.2-3B :
   SelfConsistency:
     timeout: 480
     max_concurrent: 64
-  PromptChain:
+  PromptGraph:
     timeout: 2400
     max_concurrent: 256
 
@@ -54,7 +54,7 @@ Qwen3-1.7B:
   SelfConsistency:
     timeout: 480
     max_concurrent: 64
-  PromptChain:
+  PromptGraph:
     timeout: 2400
     max_concurrent: 256
 
@@ -74,7 +74,7 @@ DeepSeek-R1-0528-Qwen3-8B:
   SelfConsistency:
     timeout: 480
     max_concurrent: 64
-  PromptChain:
+  PromptGraph:
     timeout: 2400
     max_concurrent: 256
 
@@ -94,7 +94,27 @@ medgemma-27b-it:
   SelfConsistency:
     timeout: 480
     max_concurrent: 32
-  PromptChain:
+  PromptGraph:
+    timeout: 2400
+    max_concurrent: 128
+
+gpt-oss-20b:
+  ZeroShot:
+    timeout: 240
+    max_concurrent: 128
+  OneShot:
+    timeout: 240
+    max_concurrent: 128
+  FewShot:
+    timeout: 240
+    max_concurrent: 128
+  CoT:
+    timeout: 240
+    max_concurrent: 128
+  SelfConsistency:
+    timeout: 480
+    max_concurrent: 32
+  PromptGraph:
     timeout: 2400
     max_concurrent: 128
 
@@ -114,7 +134,7 @@ gemma-3-27b-it:
   SelfConsistency:
     timeout: 480
     max_concurrent: 32
-  PromptChain:
+  PromptGraph:
     timeout: 2400
     max_concurrent: 128
 
@@ -134,7 +154,7 @@ Mistral-Small-3.1-24B-Instruct-2503:
   SelfConsistency:
     timeout: 480
     max_concurrent: 32
-  PromptChain:
+  PromptGraph:
     timeout: 2400
     max_concurrent: 128
     
@@ -154,7 +174,7 @@ Qwen2.5-72B-Instruct:
   SelfConsistency:
     timeout: 480
     max_concurrent: 16
-  PromptChain:
+  PromptGraph:
     timeout: 2400
     max_concurrent: 64
 
@@ -174,7 +194,7 @@ Llama-3_3-Nemotron-Super-49B-v1:
   SelfConsistency:
     timeout: 480
     max_concurrent: 32
-  PromptChain:
+  PromptGraph:
     timeout: 2400
     max_concurrent: 32
 
@@ -194,7 +214,7 @@ Llama3-Med42-70B:
   SelfConsistency:
     timeout: 480
     max_concurrent: 16
-  PromptChain:
+  PromptGraph:
     timeout: 2400
     max_concurrent: 64
 
@@ -214,7 +234,27 @@ Llama3-OpenBioLLM-70B:
   SelfConsistency:
     timeout: 480
     max_concurrent: 16
-  PromptChain:
+  PromptGraph:
+    timeout: 2400
+    max_concurrent: 64
+
+gpt-oss-120b:
+  ZeroShot:
+    timeout: 240
+    max_concurrent: 64
+  OneShot:
+    timeout: 240
+    max_concurrent: 64
+  FewShot:
+    timeout: 240
+    max_concurrent: 64
+  CoT:
+    timeout: 240
+    max_concurrent: 64
+  SelfConsistency:
+    timeout: 480
+    max_concurrent: 16
+  PromptGraph:
     timeout: 2400
     max_concurrent: 64
 
@@ -234,67 +274,87 @@ Llama-4-Scout-17B-16E:
   SelfConsistency:
     timeout: 480
     max_concurrent: 16
-  PromptChain:
+  PromptGraph:
     timeout: 2400
     max_concurrent: 64
 
 MiniMax-M1-80k:
   ZeroShot:
-    timeout: 360
-    max_concurrent: 32
+    timeout: 1440
+    max_concurrent: 128
   OneShot:
-    timeout: 360
-    max_concurrent: 32
+    timeout: 1440
+    max_concurrent: 128
   FewShot:
-    timeout: 360
-    max_concurrent: 32
+    timeout: 1440
+    max_concurrent: 128
   CoT:
-    timeout: 360
-    max_concurrent: 32
+    timeout: 1440
+    max_concurrent: 128
   SelfConsistency:
-    timeout: 720
-    max_concurrent: 8
-  PromptChain:
-    timeout: 3600
+    timeout: 2880
     max_concurrent: 32
+  PromptGraph:
+    timeout: 28800
+    max_concurrent: 128
 
 Qwen3-235B-A22B:
   ZeroShot:
-    timeout: 360
-    max_concurrent: 32
+    timeout: 1440
+    max_concurrent: 128
   OneShot:
-    timeout: 360
-    max_concurrent: 32
+    timeout: 1440
+    max_concurrent: 128
   FewShot:
-    timeout: 360
-    max_concurrent: 32
+    timeout: 1440
+    max_concurrent: 128
   CoT:
-    timeout: 360
-    max_concurrent: 32
+    timeout: 1440
+    max_concurrent: 128
   SelfConsistency:
-    timeout: 720
-    max_concurrent: 8
-  PromptChain:
-    timeout: 3600
+    timeout: 2880
     max_concurrent: 32
+  PromptGraph:
+    timeout: 28800
+    max_concurrent: 128
+
+Llama-4-Maverick:
+  ZeroShot:
+    timeout: 1440
+    max_concurrent: 128
+  OneShot:
+    timeout: 1440
+    max_concurrent: 128
+  FewShot:
+    timeout: 1440
+    max_concurrent: 128
+  CoT:
+    timeout: 1440
+    max_concurrent: 128
+  SelfConsistency:
+    timeout: 2880
+    max_concurrent: 32
+  PromptGraph:
+    timeout: 28800
+    max_concurrent: 128
 
 DeepSeek-R1-0528:
   ZeroShot:
-    timeout: 360
-    max_concurrent: 32
+    timeout: 1440
+    max_concurrent: 128
   OneShot:
-    timeout: 360
-    max_concurrent: 32
+    timeout: 1440
+    max_concurrent: 128
   FewShot:
-    timeout: 360
-    max_concurrent: 32
+    timeout: 1440
+    max_concurrent: 128
   CoT:
-    timeout: 360
-    max_concurrent: 32
+    timeout: 1440
+    max_concurrent: 128
   SelfConsistency:
-    timeout: 720
-    max_concurrent: 8
-  PromptChain:
-    timeout: 3600
+    timeout: 2880
     max_concurrent: 32
+  PromptGraph:
+    timeout: 28800
+    max_concurrent: 128
 

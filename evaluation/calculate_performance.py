@@ -1,13 +1,13 @@
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, Union, Optional, List
+from typing import Dict, Any, Union, Optional, List, Tuple
 import ast
 import yaml
 from scipy.stats import t
-from sklearn.metrics import balanced_accuracy_score
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, precision_score, recall_score, f1_score, jaccard_score
 from sentence_transformers import SentenceTransformer, util
-
 import warnings
+
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.metrics._classification")
 
 def safe_literal_eval(val: Union[str, None]) -> Union[None, List[Any]]:
@@ -93,6 +93,46 @@ def calculate_list_similarity(pred_list: List[str], gt_list: List[str], sentence
 
     return (gt_to_pred + pred_to_gt) / 2
 
+def bootstrap_metrics(y_true: np.ndarray, y_pred: np.ndarray, n_bootstrap: int = 1000, average: str = 'binary') -> Dict[str, Tuple[float, float, float]]:
+    """
+    Calculate bootstrap confidence intervals for various metrics.
+    """
+    rng = np.random.default_rng()
+    n_samples = len(y_true)
+    
+    metrics_dict = {
+        'accuracy': [], 'balanced_accuracy': [], 'precision': [],
+        'recall': [], 'f1': [], 'jaccard': []
+    }
+    
+    for _ in range(n_bootstrap):
+        idx = rng.integers(0, n_samples, n_samples)
+        y_true_boot = y_true[idx]
+        y_pred_boot = y_pred[idx]
+        
+        try:
+            metrics_dict['accuracy'].append(accuracy_score(y_true_boot, y_pred_boot))
+            metrics_dict['balanced_accuracy'].append(balanced_accuracy_score(y_true_boot, y_pred_boot))
+            metrics_dict['precision'].append(precision_score(y_true_boot, y_pred_boot, average=average, zero_division=0))
+            metrics_dict['recall'].append(recall_score(y_true_boot, y_pred_boot, average=average, zero_division=0))
+            metrics_dict['f1'].append(f1_score(y_true_boot, y_pred_boot, average=average, zero_division=0))
+            metrics_dict['jaccard'].append(jaccard_score(y_true_boot, y_pred_boot, average=average, zero_division=0))
+        except:
+            pass
+    
+    result = {}
+    for metric_name, values in metrics_dict.items():
+        if values:
+            result[metric_name] = (
+                np.mean(values),
+                np.percentile(values, 2.5),
+                np.percentile(values, 97.5)
+            )
+        else:
+            result[metric_name] = (np.nan, np.nan, np.nan)
+    
+    return result
+
 def calculate_results(
     prediction: pd.DataFrame, 
     ground_truth: pd.DataFrame, 
@@ -101,8 +141,8 @@ def calculate_results(
     weights: Optional[List[int]] = None,
     n_bootstrap: int = 1000,
     use_balanced_accuracy: bool = False,
-    exclude_default: bool = False
-) -> pd.DataFrame:    
+    strict_metrics: bool = False
+) -> pd.DataFrame:
     """
     Calculate performance metrics comparing prediction against ground truth.
     
@@ -114,12 +154,11 @@ def calculate_results(
         weights (Optional[List[int]]): Weights for each field used for micro averaging.
         n_bootstrap (int): Number of bootstrap samples for CI; if <=1, skip bootstrapping.
         use_balanced_accuracy (bool): If True, use balanced accuracy for categorical/binary fields instead of normal accuracy.
-        exclude_default (bool): If True, exclude entries with default values in ground truth from calculations.
+        strict_metrics (bool): If True, exclude entries with default values in ground truth from calculations.
     
     Returns:
         pd.DataFrame: DataFrame containing calculated metrics for each field plus micro average.
     """
-    # Sanity check
     if not prediction.columns.equals(ground_truth.columns):
         raise ValueError("Prediction and ground truth DataFrames must have the same columns.")
     if len(prediction) != len(ground_truth):
@@ -146,175 +185,172 @@ def calculate_results(
                 ) else x
             )
 
-        # Exclude default values if specified
-        hallucinations = "N/A"
-        if exclude_default:
-            mask = ground_truth[field] != default_value
+        prediction_field = prediction[field].copy()
+        ground_truth_field = ground_truth[field].copy()
 
-            # Calculate hallucinations (i.e. ground truth is default but prediction is not)
-            hallucinations = ((ground_truth[field] == default_value) & (prediction[field] != default_value)).sum()
+        if type_value in {"number", "float"}:
+            # Numeric exact match
+            prediction_field = pd.to_numeric(prediction_field, errors='coerce', downcast="float")
+            ground_truth_field = pd.to_numeric(ground_truth_field, errors='coerce', downcast="float")
 
-            prediction = prediction[mask].reset_index(drop=True)
-            ground_truth = ground_truth[mask].reset_index(drop=True)
+        y_true = ground_truth_field.astype(str)
+        y_pred = prediction_field.astype(str)
 
-        scores = None
+        # Exclude default values if specified for strict metrics
+        if strict_metrics:
+            mask = (y_true != str(default_value)) | (y_pred != str(default_value))
+            y_pred = y_pred[mask].reset_index(drop=True)
+            y_true = y_true[mask].reset_index(drop=True)
+
+        # Initialize variables for metric_type, mean, ci_low, ci_high
         metric_type = None
+        mean_score = np.nan
+        ci_low = np.nan
+        ci_high = np.nan
 
-        if type_value in {"string", "binary", "boolean", "categorical", "categorical_number"}:
-            if "options" in meta:
-                if type_value in {"binary", "boolean", "categorical_number"}:
-                    prediction[field] = pd.to_numeric(prediction[field], errors='coerce')
-                    ground_truth[field] = pd.to_numeric(ground_truth[field], errors='coerce')
-                    prediction[field] = prediction[field].fillna(default_value).astype(str)
-                    ground_truth[field] = ground_truth[field].fillna(default_value).astype(str)
+        accuracy, accuracy_ci_low, accuracy_ci_high = np.nan, np.nan, np.nan
+        balanced_acc, balanced_acc_ci_low, balanced_acc_ci_high = np.nan, np.nan, np.nan
+        similarity, similarity_ci_low, similarity_ci_high = np.nan, np.nan, np.nan
+        precision, precision_ci_low, precision_ci_high = np.nan, np.nan, np.nan
+        recall, recall_ci_low, recall_ci_high = np.nan, np.nan, np.nan
+        f1, f1_ci_low, f1_ci_high = np.nan, np.nan, np.nan
+        jaccard, jaccard_ci_low, jaccard_ci_high = np.nan, np.nan, np.nan
 
-                if use_balanced_accuracy:
-                    # Compute balanced accuracy per bootstrap later
-                    metric_type = "balanced_accuracy"
-                else:
-                    scores = (prediction[field] == ground_truth[field]).astype(int).to_numpy()
-                    metric_type = "accuracy"
+        # Calculate classification metrics for all field types except lists
+        if type_value != "list":
+            classes = meta.get("options", None)
+            average_method = 'binary' if classes and len(classes) == 2 else 'macro'
+            
+            if n_bootstrap > 1:
+                boot_metrics = bootstrap_metrics(y_true, y_pred, n_bootstrap, average_method)
+                accuracy, accuracy_ci_low, accuracy_ci_high = boot_metrics['accuracy']
+                balanced_acc, balanced_acc_ci_low, balanced_acc_ci_high = boot_metrics['balanced_accuracy']
+                precision, precision_ci_low, precision_ci_high = boot_metrics['precision']
+                recall, recall_ci_low, recall_ci_high = boot_metrics['recall']
+                f1, f1_ci_low, f1_ci_high = boot_metrics['f1']
+                jaccard, jaccard_ci_low, jaccard_ci_high = boot_metrics['jaccard']
             else:
-                # Semantic similarity for free text
-                scores = pd.Series([
-                    calculate_similarity(str(p), str(g), sentence_model)
-                    for p, g in zip(prediction[field], ground_truth[field])
-                ]).to_numpy()
-                metric_type = "semantic_similarity"
+                accuracy = accuracy_score(y_true, y_pred)
+                balanced_acc = balanced_accuracy_score(y_true, y_pred)
+                precision = precision_score(y_true, y_pred, average=average_method, zero_division=0)
+                recall = recall_score(y_true, y_pred, average=average_method, zero_division=0)
+                f1 = f1_score(y_true, y_pred, average=average_method, zero_division=0)
+                jaccard = jaccard_score(y_true, y_pred, average=average_method, zero_division=0)
+                
+                accuracy_ci_low, accuracy_ci_high = accuracy, accuracy
+                balanced_acc_ci_low, balanced_acc_ci_high = balanced_acc, balanced_acc
+                precision_ci_low, precision_ci_high = precision, precision
+                recall_ci_low, recall_ci_high = recall, recall
+                f1_ci_low, f1_ci_high = f1, f1
+                jaccard_ci_low, jaccard_ci_high = jaccard, jaccard
 
-        elif type_value == "string_exact_match":
-            scores = (prediction[field] == ground_truth[field]).astype(int).to_numpy()
-            metric_type = "accuracy"
+            # Set metric_type, mean, ci_low, ci_high based on original logic
+            if use_balanced_accuracy and type_value in {"binary", "boolean", "categorical", "categorical_number"}:
+                metric_type = "balanced_accuracy"
+                mean_score = balanced_acc
+                ci_low = balanced_acc_ci_low
+                ci_high = balanced_acc_ci_high
+            else:
+                metric_type = "accuracy"
+                mean_score = accuracy
+                ci_low = accuracy_ci_low
+                ci_high = accuracy_ci_high
 
-        elif type_value in {"number", "float"}:
-            prediction[field] = pd.to_numeric(prediction[field], errors='coerce')
-            ground_truth[field] = pd.to_numeric(ground_truth[field], errors='coerce')
-            prediction[field] = prediction[field].fillna(default_value).astype(str)
-            ground_truth[field] = ground_truth[field].fillna(default_value).astype(str)
-            scores = (prediction[field] == ground_truth[field]).astype(int).to_numpy()
-            metric_type = "accuracy"
-
-        elif type_value == "list":
-            prediction[field] = prediction[field].apply(lambda x: x if isinstance(x, list) else [])
-            ground_truth[field] = ground_truth[field].apply(
-                lambda x: x if isinstance(x, list) else x.split(", ") if isinstance(x, str) else []
-            )
+        if type_value == "string":
             scores = pd.Series([
-                calculate_list_similarity(p, g, sentence_model)
-                for p, g in zip(prediction[field], ground_truth[field])
+                calculate_similarity(str(p), str(g), sentence_model)
+                for p, g in zip(prediction_field, ground_truth_field)
             ]).to_numpy()
-            metric_type = "list_similarity"
-
-        else:
-            raise ValueError(f"Unsupported field type for field '{field}': {meta.get('type')}")
-
-        # Bootstrapping for CI
-        if n_bootstrap > 1:
-            rng = np.random.default_rng()
-            boot_means = []
-            if use_balanced_accuracy and metric_type == "balanced_accuracy":
-                # True balanced accuracy bootstrap
-                gt_arr = np.array(ground_truth[field])
-                pred_arr = np.array(prediction[field])
-                for _ in range(n_bootstrap):
-                    idx = rng.integers(0, len(gt_arr), len(gt_arr))
-                    try:
-                        ba = balanced_accuracy_score(gt_arr[idx], pred_arr[idx])
-                        boot_means.append(ba)
-                    except ValueError:
-                        pass  # occurs if bootstrap sample has one class only
-            else:
+            
+            if n_bootstrap > 1:
+                rng = np.random.default_rng()
+                boot_scores = []
                 for _ in range(n_bootstrap):
                     idx = rng.integers(0, len(scores), len(scores))
-                    boot_means.append(np.nanmean(scores[idx]))
-            mean_score = np.nanmean(boot_means) if boot_means else np.nan
-            ci = (np.nanpercentile(boot_means, 2.5), np.nanpercentile(boot_means, 97.5)) if boot_means else (np.nan, np.nan)
-        else:
-            if use_balanced_accuracy and metric_type == "balanced_accuracy":
-                raise ValueError("Impossible to provide use balanced accuracy without bootstrapping.")
+                    boot_scores.append(np.nanmean(scores[idx]))
+                
+                similarity = np.mean(boot_scores)
+                similarity_ci_low, similarity_ci_high = np.percentile(boot_scores, 2.5), np.percentile(boot_scores, 97.5)
             else:
-                n = np.isfinite(scores).sum()
-                mean_score = np.nanmean(scores)
-                std_err = np.nanstd(scores, ddof=1) / np.sqrt(n) if n > 1 else 0
-                ci = t.interval(0.95, df=n-1, loc=mean_score, scale=std_err) if n > 1 else (mean_score, mean_score)
+                similarity = np.nanmean(scores)
+                similarity_ci_low, similarity_ci_high = similarity, similarity
+
+            metric_type = "semantic_similarity"
+            mean_score = similarity
+            ci_low = similarity_ci_low
+            ci_high = similarity_ci_high
+
+        elif type_value == "list":
+            # List similarity - reset classification metrics since they don't apply
+            accuracy, accuracy_ci_low, accuracy_ci_high = np.nan, np.nan, np.nan
+            balanced_acc, balanced_acc_ci_low, balanced_acc_ci_high = np.nan, np.nan, np.nan
+            precision, precision_ci_low, precision_ci_high = np.nan, np.nan, np.nan
+            recall, recall_ci_low, recall_ci_high = np.nan, np.nan, np.nan
+            f1, f1_ci_low, f1_ci_high = np.nan, np.nan, np.nan
+            jaccard, jaccard_ci_low, jaccard_ci_high = np.nan, np.nan, np.nan
+            
+            prediction_field = prediction_field.apply(
+                lambda x: [s for s in x if isinstance(s, str) and s.strip()] if isinstance(x, list) else []
+            )
+            ground_truth_field = ground_truth_field.apply(
+                lambda x: x if isinstance(x, list) else x.split(", ") if isinstance(x, str) else []
+            )
+            
+            scores = pd.Series([
+                calculate_list_similarity(p, g, sentence_model)
+                for p, g in zip(prediction_field, ground_truth_field)
+            ]).to_numpy()
+            
+            if n_bootstrap > 1:
+                rng = np.random.default_rng()
+                boot_scores = []
+                for _ in range(n_bootstrap):
+                    idx = rng.integers(0, len(scores), len(scores))
+                    boot_scores.append(np.nanmean(scores[idx]))
+                
+                similarity = np.mean(boot_scores)
+                similarity_ci_low, similarity_ci_high = np.percentile(boot_scores, 2.5), np.percentile(boot_scores, 97.5)
+            else:
+                similarity = np.nanmean(scores)
+                similarity_ci_low, similarity_ci_high = similarity, similarity
+
+            metric_type = "list_similarity"
+            mean_score = similarity
+            ci_low = similarity_ci_low
+            ci_high = similarity_ci_high
 
         results.append({
             "field": field,
+            "field_type": type_value,
             "metric_type": metric_type,
             "mean": mean_score,
-            "ci_low": ci[0],
-            "ci_high": ci[1],
+            "ci_low": ci_low,
+            "ci_high": ci_high,
+            "accuracy": accuracy,
+            "accuracy_CI_low": accuracy_ci_low,
+            "accuracy_CI_high": accuracy_ci_high,
+            "balanced_accuracy": balanced_acc,
+            "balanced_accuracy_CI_low": balanced_acc_ci_low,
+            "balanced_accuracy_CI_high": balanced_acc_ci_high,
+            "similarity_index": similarity,
+            "similarity_index_CI_low": similarity_ci_low,
+            "similarity_index_CI_high": similarity_ci_high,
+            "precision": precision,
+            "precision_CI_low": precision_ci_low,
+            "precision_CI_high": precision_ci_high,
+            "recall": recall,
+            "recall_CI_low": recall_ci_low,
+            "recall_CI_high": recall_ci_high,
+            "F1": f1,
+            "F1_CI_low": f1_ci_low,
+            "F1_CI_high": f1_ci_high,
+            "Jaccard": jaccard,
+            "Jaccard_CI_low": jaccard_ci_low,
+            "Jaccard_CI_high": jaccard_ci_high,
             "weight": field_weight,
-            "scores": scores,
-            "hallucinations": hallucinations if exclude_default else None
         })
 
-    if results:
-        results_df = pd.DataFrame(results)
-
-        if use_balanced_accuracy:
-            # --- Macro average ---
-            if weights is None:
-                macro_avg = np.nanmean(results_df["mean"])
-            else:
-                macro_avg = np.average(results_df["mean"], weights=results_df["weight"])
-
-            if n_bootstrap > 1:
-                rng = np.random.default_rng()
-                boot_macro = []
-                for _ in range(n_bootstrap):
-                    idx = rng.integers(0, len(results_df), len(results_df))
-                    if weights is None:
-                        boot_macro.append(np.nanmean(results_df["mean"].iloc[idx]))
-                    else:
-                        boot_macro.append(
-                            np.average(results_df["mean"].iloc[idx], weights=results_df["weight"].iloc[idx])
-                        )
-                ci_macro = (np.nanpercentile(boot_macro, 2.5), np.nanpercentile(boot_macro, 97.5))
-            else:
-                std_err = np.nanstd(results_df["mean"], ddof=1) / np.sqrt(len(results_df))
-                ci_macro = t.interval(0.95, df=len(results_df)-1, loc=macro_avg, scale=std_err)
-
-            avg_results = {
-                "field": "All Fields",
-                "metric_type": "macro_avg",
-                "mean": macro_avg,
-                "ci_low": ci_macro[0],
-                "ci_high": ci_macro[1],
-                "weight": None,
-                "scores": None,
-                "hallucinations": None
-            }
-        else:
-            # --- Micro average ---
-            scores = np.stack(results_df["scores"].values)  # shape: (fields, samples)
-            patient_means = np.nanmean(scores, axis=0)  # mean per patient
-            micro_avg = np.nanmean(patient_means)
-
-            if n_bootstrap > 1:
-                rng = np.random.default_rng()
-                boot_micro = [
-                    np.nanmean(np.nanmean(scores[:, idx], axis=0))
-                    for idx in (rng.integers(0, scores.shape[1], scores.shape[1]) for _ in range(n_bootstrap))
-                ]
-                ci_micro = (np.nanpercentile(boot_micro, 2.5), np.nanpercentile(boot_micro, 97.5))
-            else:
-                std_err = np.nanstd(patient_means, ddof=1) / np.sqrt(len(patient_means))
-                ci_micro = t.interval(0.95, df=len(patient_means)-1, loc=micro_avg, scale=std_err)
-
-            avg_results = {
-                "field": "All Fields",
-                "metric_type": "micro_avg",
-                "mean": micro_avg,
-                "ci_low": ci_micro[0],
-                "ci_high": ci_micro[1],
-                "weight": None,
-                "scores": None,
-                "hallucinations": None
-            }
-
-        return pd.concat([results_df, pd.DataFrame([avg_results])], ignore_index=True)
-    return None
+    return pd.DataFrame(results)
 
 def process_results(
     LLM_output: Union[pd.DataFrame, str], 
@@ -325,7 +361,7 @@ def process_results(
     output_file: Optional[str] = None,
     n_bootstrap: int = 1000,
     use_balanced_accuracy: bool = False,
-    exclude_default: bool = False
+    strict_metrics: bool = False,
     ) -> None:
     """
     Process LLM output and compare it against ground truth.
@@ -339,7 +375,7 @@ def process_results(
         output_file (Optional[str]): Path to save the results output file.
         n_bootstrap (int): Number of bootstrap samples for CI; if <=1, skip bootstrapping.
         use_balanced_accuracy (bool): If True, use balanced accuracy for categorical/binary fields instead of normal accuracy.
-        exclude_default (bool): If True, exclude entries with default values in ground truth from calculations.
+        strict_metrics (bool): If True, exclude entries with default values in ground truth from calculations.
     """
     if isinstance(LLM_output, str):
         LLM_output = pd.read_csv(LLM_output, converters={"extracted_data": safe_literal_eval})
@@ -347,13 +383,11 @@ def process_results(
     if isinstance(prompt_config, str):
         prompt_config = read_prompt_config(prompt_config)
 
-    # Check if JSON is in LLM output by counting None values and fill those with default dictionary
     default_dict = {key: value.get("default", "Unknown") for key, value in prompt_config.items()}
     LLM_output[["extracted_data", "missing_json"]] = LLM_output["extracted_data"].apply(
         lambda x: (x, True) if isinstance(x, dict) else (default_dict, False)
     ).apply(pd.Series)
 
-    # Remove items not in prompt config
     LLM_output["extracted_data"] = LLM_output["extracted_data"].apply(
         lambda x: {k: v for k, v in x.items() if k in prompt_config}
     )
@@ -361,40 +395,32 @@ def process_results(
     if ground_truth is not None:
         if isinstance(ground_truth, str):
             ground_truth = pd.read_csv(ground_truth)
-
         raise ValueError("Ground truth comparison through a different file is not implemented at this moment.")
     else:
-        # Ground truth are in LLM output, so extract them from LLM_output
         ground_truth = LLM_output.copy()
-        
-        # Check if ground truth columns are present such as in prompt_config
         missing_fields = [field for field in prompt_config if field not in ground_truth.columns]
         if missing_fields:
-            print(f"[WARNING] The following fields from prompt config are missing in ground truth so results with not be calculated for these: {missing_fields}")
+            print(f"[WARNING] Missing fields in ground truth: {missing_fields}")
         
-        # Remove missing fields from prompt_config
         prompt_config = {key: value for key, value in prompt_config.items() if key not in missing_fields}
         ground_truth = ground_truth[prompt_config.keys()]
 
-    # Extract the data from LLM output
     prediction = pd.DataFrame(LLM_output["extracted_data"].tolist())
     prediction = prediction[prompt_config.keys()]
 
-    # Load sentence transformer model
     sentence_model = SentenceTransformer(sentence_model)
 
-    # Calculate results
     results = calculate_results(
         prediction=prediction, 
         ground_truth=ground_truth, 
         prompt_config=prompt_config, 
         sentence_model=sentence_model, 
-        weights=scoring_weights, 
+        weights=scoring_weights,
+        n_bootstrap=n_bootstrap,
         use_balanced_accuracy=use_balanced_accuracy,
-        n_bootstrap=n_bootstrap
+        strict_metrics=strict_metrics
     )
 
-    # If output file is specified, save the results
     if output_file:
         results.to_csv(output_file, index=False)
         print(f"Results saved to {output_file}")
@@ -450,7 +476,7 @@ if __name__ == "__main__":
         "--balanced-accuracy", action="store_true", help="Do you want to calculate balanced accuracy instead of accuracy."
     )
     parser.add_argument(
-        "--exclude-default", action="store_true", help="Exclude entries with default values in ground truth from calculations."
+        "--strict-metrics", action="store_true", help="Exclude entries with default values from calculations for strict metrics."
     )
     parser.add_argument(
         "-w",
@@ -470,5 +496,6 @@ if __name__ == "__main__":
         scoring_weights=args.weights,
         output_file=args.output_file,
         n_bootstrap=args.bootstrap,
-        use_balanced_accuracy=args.balanced_accuracy
+        use_balanced_accuracy=args.balanced_accuracy,
+        strict_metrics=args.strict_metrics
     )
