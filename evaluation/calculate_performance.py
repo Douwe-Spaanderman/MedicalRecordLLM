@@ -164,8 +164,13 @@ def calculate_results(
     if len(prediction) != len(ground_truth):
         raise ValueError("Prediction and ground truth DataFrames must have the same number of rows.")
     
+    prediction_ = prediction
+    ground_truth_ = ground_truth
+
     results = []
     for field, meta in prompt_config.items():
+        prediction = prediction_.copy()
+        ground_truth = ground_truth_.copy()
         default_value = meta.get("default", "Unknown")
         type_value = meta.get("type", "string").replace("_or_missing", "")
         if meta.get("options") and not type_value in {"binary", "boolean"}:

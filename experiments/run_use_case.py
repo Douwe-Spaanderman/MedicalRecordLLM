@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 from collections import defaultdict
+from glob import glob
+import re
 
 try:
     project_root = Path(__file__).resolve().parents[1]
@@ -39,8 +41,9 @@ class ExperimentRunner:
         vllm_timeout: int = 600,
         base_url: str = "http://localhost:8000/v1/",
         balanced_accuracy: bool = False,
-        exclude_default: bool = False,
+        strict_metrics: bool = False,
         measurement_run: bool = False,
+        python_cmd: str = "python",
         dry_run: bool = False,
     ):
         self.data_path = data_path
@@ -61,8 +64,9 @@ class ExperimentRunner:
         self.vllm_timeout = vllm_timeout
         self.base_url = base_url
         self.balanced_accuracy = balanced_accuracy
-        self.exclude_default = exclude_default
+        self.strict_metrics = strict_metrics
         self.measurement_run = measurement_run
+        self.python_cmd = python_cmd
         self.dry_run = dry_run
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -152,10 +156,9 @@ class ExperimentRunner:
         for model_config_path in self.model_configs:
             model_config = self.read_config(model_config_path)
             model_name = model_config.get("model", model_config_path.stem).split("/")[-1]
+            vllm_process = None
             if self.vllm_server:
                 vllm_process = self.start_vllm_server(model_config)
-            else:
-                vllm_process = None
 
             try:
                 self.wait_for_vllm_ready(timeout=self.vllm_timeout)
@@ -188,7 +191,7 @@ class ExperimentRunner:
             return None
         
         command = [
-            "python", "-m", "vllm.entrypoints.openai.api_server",
+            self.python_cmd, "-m", "vllm.entrypoints.openai.api_server",
             "--model", model_config["model"],
             "--tensor-parallel-size", str(self.gpu_parallelization),
             "--pipeline_parallel_size", str(self.node_parallelization),
@@ -277,7 +280,7 @@ class ExperimentRunner:
         max_concurrent = self.get_max_concurrent(model_name, prompt_method)
 
         command = [
-            "python", str(project_root / "run.py"),
+            self.python_cmd, str(project_root / "run.py"),
             "-i", str(self.data_path),
             "-o", str(output_file),
             "-pm", prompt_method,
@@ -331,7 +334,7 @@ class ExperimentRunner:
         perf_output_path = llm_output_path.with_suffix(".performance.csv")
 
         command = [
-            "python", str(project_root / "evaluation" / "calculate_performance.py"),
+            self.python_cmd, str(project_root / "evaluation" / "calculate_performance.py"),
             "-l", str(llm_output_path),
             "-p", str(self.prompt_config_path),
             "-o", str(perf_output_path),
@@ -341,7 +344,7 @@ class ExperimentRunner:
             command.extend([
                 "--balanced-accuracy"
             ])
-        if self.exclude_default:
+        if self.strict_metrics:
             command.append("--strict-metrics")
 
         if self.dry_run:
@@ -396,7 +399,7 @@ class ExperimentRunner:
             labels (List[str]): Optional labels for each input file.
         """
         command = [
-            "python", str(project_root / "evaluation" / "visualize_performance.py"),
+            self.python_cmd, str(project_root / "evaluation" / "visualize_performance.py"),
             "-i"
         ] + input_files + [
             "-o", str(output_file),
@@ -430,8 +433,11 @@ class ExperimentRunner:
            return
 
         if not self.performance_files:
-            self.logger.info("[Ranking] No performance files found to rank.")
-            return
+            self.logger.info("[Ranking] No performance files found to rank, attempting to gather...")
+            self.gather_performance_files()
+            if not self.performance_files:
+                self.logger.info("[Ranking] Still no performance files found to rank after gathering.")
+                return
         
         self.logger.info("[Ranking] Starting rank aggregation of performance results...")
 
@@ -455,7 +461,7 @@ class ExperimentRunner:
                 Options are "borda", "kemeny", or "ranked_pairs".
         """
         command = [
-            "python", str(project_root / "evaluation" / "rank_aggregation.py"),
+            self.python_cmd, str(project_root / "evaluation" / "rank_aggregation.py"),
             "-i"
         ] + input_files + [
             "-o", str(output_file),
@@ -476,6 +482,14 @@ class ExperimentRunner:
             self.logger.error(e)
         except Exception as e:
             self.logger.error(f"[Unexpected Error] {str(e)}")
+
+    def gather_performance_files(self):
+        base_path = self.output_dir
+
+        for path in glob(f"{base_path}/*/*.performance.csv"):
+            m = re.match(fr"{base_path}/(.*)/(.*).performance.csv", path)
+            model_name, prompt_method = m.groups()
+            self.performance_files[model_name].append((prompt_method, path))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run all LLM experiments.")
@@ -578,12 +592,18 @@ if __name__ == "__main__":
         help="Use balanced accuracy and macro average for performance calculation."
     )
     parser.add_argument(
-        "--exclude-default-in-evaluation",
+        "--strict-metrics",
         action="store_true",
         help="Exclude entries with default values in ground truth from performance calculations."
     )
     parser.add_argument(
         "--measurement-run", action="store_true", help="Perform only measurement without prompting llm."
+    )
+    parser.add_argument(
+        "--python-cmd", type=str, default="python", help="Command for python binary."
+    )
+    parser.add_argument(
+        "--only-rank-all", action="store_true", help="Only run rank aggregation on existing performance files."
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Print commands without running them."
@@ -608,10 +628,13 @@ if __name__ == "__main__":
         vllm_timeout=args.vllm_timeout,
         base_url=args.vllm_base_url,
         balanced_accuracy=args.with_balanced_accuracy,
-        exclude_default=args.exclude_default_in_evaluation,
+        strict_metrics=args.exclude_default_in_evaluation,
         measurement_run=args.measurement_run,
+        python_cmd=args.python_cmd,
         dry_run=args.dry_run,
     )
-    runner.run()
+    if not args.only_rank_all:
+        runner.run()
+        
     runner.run_ranking()
     runner.run_visualization()
