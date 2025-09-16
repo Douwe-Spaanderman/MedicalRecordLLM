@@ -628,7 +628,7 @@ if __name__ == "__main__":
         vllm_timeout=args.vllm_timeout,
         base_url=args.vllm_base_url,
         balanced_accuracy=args.with_balanced_accuracy,
-        strict_metrics=args.exclude_default_in_evaluation,
+        strict_metrics=args.strict_metrics,
         measurement_run=args.measurement_run,
         python_cmd=args.python_cmd,
         dry_run=args.dry_run,
