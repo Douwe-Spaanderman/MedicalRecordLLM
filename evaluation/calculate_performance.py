@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import numpy.typing as npt
 from typing import Dict, Any, Union, Optional, List, Tuple
 import ast
 import yaml
@@ -7,8 +8,14 @@ from scipy.stats import t
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, precision_score, recall_score, f1_score, jaccard_score
 from sentence_transformers import SentenceTransformer, util
 import warnings
+from functools import lru_cache
 
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.metrics._classification")
+
+# Global variable for sentence model to avoid reloading
+@lru_cache(maxsize=1)
+def load_sentence_model(model_name: str) -> SentenceTransformer:
+    return SentenceTransformer(model_name)
 
 def safe_literal_eval(val: Union[str, None]) -> Union[None, List[Any]]:
     """
@@ -38,16 +45,19 @@ def read_prompt_config(prompt_config_path: str) -> Dict[str, Any]:
     prompt = {item["name"]: {key: value for key, value in item.items() if key != "name"} for item in prompt}
     return prompt
 
-def calculate_similarity(pred: str, gt: str, sentence_model: SentenceTransformer) -> float:
+def calculate_similarity(pred: str, gt: str, sentence_model: str) -> float:
     """
     Calculate semantic similarity between two strings using a sentence transformer model.
 
     Args:
         pred (str): The predicted string.
         gt (str): The ground truth string.
+        sentence_model (str): The sentence transformer model to use.
     Returns:
         float: Similarity score between 0.0 and 1.0.
     """
+    sentence_model = load_sentence_model(sentence_model)
+
     if pred == gt:
         return 1.0 # Complete match
     if not gt:
@@ -59,13 +69,14 @@ def calculate_similarity(pred: str, gt: str, sentence_model: SentenceTransformer
     similarity = util.cos_sim(embeddings[0], embeddings[1]).item()
     return similarity
 
-def calculate_list_similarity(pred_list: List[str], gt_list: List[str], sentence_model: SentenceTransformer) -> float:
+def calculate_list_similarity(pred_list: List[str], gt_list: List[str], sentence_model: str) -> float:
     """
     Compute average maximum similarity for each ground truth item against the predicted list.
     
     Args:
         pred_list (List[str]): List of predicted strings.
         gt_list (List[str]): List of ground truth strings.
+        sentence_model (str): The sentence transformer model to use.
     Returns:
         float: Average maximum similarity score for ground truth items against predictions.
     """
@@ -93,7 +104,7 @@ def calculate_list_similarity(pred_list: List[str], gt_list: List[str], sentence
 
     return (gt_to_pred + pred_to_gt) / 2
 
-def bootstrap_metrics(y_true: np.ndarray, y_pred: np.ndarray, n_bootstrap: int = 1000, average: str = 'binary') -> Dict[str, Tuple[float, float, float]]:
+def bootstrap_metrics(y_true: np.ndarray, y_pred: np.ndarray, n_bootstrap: int = 1000, average: str = 'binary') -> Dict[str, Tuple[float, float, float, npt.NDArray[np.float32]]]:
     """
     Calculate bootstrap confidence intervals for various metrics.
     """
@@ -126,10 +137,11 @@ def bootstrap_metrics(y_true: np.ndarray, y_pred: np.ndarray, n_bootstrap: int =
             result[metric_name] = (
                 np.mean(values),
                 np.percentile(values, 2.5),
-                np.percentile(values, 97.5)
+                np.percentile(values, 97.5),
+                np.array(values)
             )
         else:
-            result[metric_name] = (np.nan, np.nan, np.nan)
+            result[metric_name] = (np.nan, np.nan, np.nan, np.nan)
     
     return result
 
@@ -137,7 +149,7 @@ def calculate_results(
     prediction: pd.DataFrame, 
     ground_truth: pd.DataFrame, 
     prompt_config: Dict[str, Any], 
-    sentence_model: SentenceTransformer, 
+    sentence_model: str, 
     weights: Optional[List[int]] = None,
     n_bootstrap: int = 1000,
     use_balanced_accuracy: bool = False,
@@ -150,7 +162,7 @@ def calculate_results(
         prediction (pd.DataFrame): DataFrame containing predicted values.
         ground_truth (pd.DataFrame): DataFrame containing ground truth values.
         prompt_config (Dict[str, Any]): Configuration dictionary defining fields and their types.
-        sentence_model (SentenceTransformer): Pretrained sentence transformer model for semantic similarity.
+        sentence_model (str): The sentence transformer model to use.
         weights (Optional[List[int]]): Weights for each field used for micro averaging.
         n_bootstrap (int): Number of bootstrap samples for CI; if <=1, skip bootstrapping.
         use_balanced_accuracy (bool): If True, use balanced accuracy for categorical/binary fields instead of normal accuracy.
@@ -213,8 +225,8 @@ def calculate_results(
         ci_low = np.nan
         ci_high = np.nan
 
-        accuracy, accuracy_ci_low, accuracy_ci_high = np.nan, np.nan, np.nan
-        balanced_acc, balanced_acc_ci_low, balanced_acc_ci_high = np.nan, np.nan, np.nan
+        accuracy, accuracy_ci_low, accuracy_ci_high, all_accuracy = np.nan, np.nan, np.nan, np.nan
+        balanced_acc, balanced_acc_ci_low, balanced_acc_ci_high, all_balanced_acc = np.nan, np.nan, np.nan, np.nan
         similarity, similarity_ci_low, similarity_ci_high = np.nan, np.nan, np.nan
         precision, precision_ci_low, precision_ci_high = np.nan, np.nan, np.nan
         recall, recall_ci_low, recall_ci_high = np.nan, np.nan, np.nan
@@ -228,12 +240,12 @@ def calculate_results(
             
             if n_bootstrap > 1:
                 boot_metrics = bootstrap_metrics(y_true, y_pred, n_bootstrap, average_method)
-                accuracy, accuracy_ci_low, accuracy_ci_high = boot_metrics['accuracy']
-                balanced_acc, balanced_acc_ci_low, balanced_acc_ci_high = boot_metrics['balanced_accuracy']
-                precision, precision_ci_low, precision_ci_high = boot_metrics['precision']
-                recall, recall_ci_low, recall_ci_high = boot_metrics['recall']
-                f1, f1_ci_low, f1_ci_high = boot_metrics['f1']
-                jaccard, jaccard_ci_low, jaccard_ci_high = boot_metrics['jaccard']
+                accuracy, accuracy_ci_low, accuracy_ci_high, all_accuracy = boot_metrics['accuracy']
+                balanced_acc, balanced_acc_ci_low, balanced_acc_ci_high, all_balanced_acc = boot_metrics['balanced_accuracy']
+                precision, precision_ci_low, precision_ci_high, _ = boot_metrics['precision']
+                recall, recall_ci_low, recall_ci_high, _ = boot_metrics['recall']
+                f1, f1_ci_low, f1_ci_high, _ = boot_metrics['f1']
+                jaccard, jaccard_ci_low, jaccard_ci_high, _ = boot_metrics['jaccard']
             else:
                 accuracy = accuracy_score(y_true, y_pred)
                 balanced_acc = balanced_accuracy_score(y_true, y_pred)
@@ -255,11 +267,14 @@ def calculate_results(
                 mean_score = balanced_acc
                 ci_low = balanced_acc_ci_low
                 ci_high = balanced_acc_ci_high
+                all_scores = all_balanced_acc
+                #all_scores = boot_scores if n_bootstrap > 1 else scores
             else:
                 metric_type = "accuracy"
                 mean_score = accuracy
                 ci_low = accuracy_ci_low
                 ci_high = accuracy_ci_high
+                all_scores = all_accuracy
 
         if type_value == "string":
             scores = pd.Series([
@@ -284,6 +299,7 @@ def calculate_results(
             mean_score = similarity
             ci_low = similarity_ci_low
             ci_high = similarity_ci_high
+            all_scores = boot_scores if n_bootstrap > 1 else scores
 
         elif type_value == "list":
             # List similarity - reset classification metrics since they don't apply
@@ -323,6 +339,7 @@ def calculate_results(
             mean_score = similarity
             ci_low = similarity_ci_low
             ci_high = similarity_ci_high
+            all_scores = boot_scores if n_bootstrap > 1 else scores
 
         results.append({
             "field": field,
@@ -331,6 +348,7 @@ def calculate_results(
             "mean": mean_score,
             "ci_low": ci_low,
             "ci_high": ci_high,
+            "all_scores": all_scores,
             "accuracy": accuracy,
             "accuracy_CI_low": accuracy_ci_low,
             "accuracy_CI_high": accuracy_ci_high,
@@ -354,6 +372,32 @@ def calculate_results(
             "Jaccard_CI_high": jaccard_ci_high,
             "weight": field_weight,
         })
+
+    # Calculate macro average
+    if n_bootstrap > 1:
+        # stack all bootstrap scores across fields
+        all_bootstrap_scores = np.concatenate([r["all_scores"] for r in results])
+
+        macro_mean = np.mean(all_bootstrap_scores)
+        ci_low = np.percentile(all_bootstrap_scores, 2.5)
+        ci_high = np.percentile(all_bootstrap_scores, 97.5)
+    else:
+        # take per-field means
+        field_means = np.array([r["mean"] for r in results])
+
+        macro_mean = np.mean(field_means)
+        se = np.std(field_means, ddof=1) / np.sqrt(len(field_means))
+        ci_low = macro_mean - 1.96 * se
+        ci_high = macro_mean + 1.96 * se
+
+    results.append({
+        "field": "All fields",
+        "field_type": "mixed",
+        "metric_type": "macro_avg",
+        "mean": macro_mean,
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+    })
 
     return pd.DataFrame(results)
 
@@ -412,8 +456,6 @@ def process_results(
 
     prediction = pd.DataFrame(LLM_output["extracted_data"].tolist())
     prediction = prediction[prompt_config.keys()]
-
-    sentence_model = SentenceTransformer(sentence_model)
 
     results = calculate_results(
         prediction=prediction, 

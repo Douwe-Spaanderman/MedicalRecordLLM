@@ -169,3 +169,4 @@ experiment/*
 setup.sh
 slurm/*
 todo.txt
+run.sh

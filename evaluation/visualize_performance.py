@@ -25,7 +25,7 @@ custom_params = {
 }
 sns.set_theme(style=style, rc=custom_params, palette=sns.color_palette(palette))
 
-def add_ranks(ranked_results: pd.DataFrame, data_labels: List[str]) -> List[str]:
+def add_ranks(ranked_results: pd.DataFrame, rank_method: str, data_labels: List[str]) -> List[str]:
     """
     Add rank information to the data labels based on the ranked results DataFrame.
     
@@ -43,7 +43,7 @@ def add_ranks(ranked_results: pd.DataFrame, data_labels: List[str]) -> List[str]
             2: "(2nd)",
             3: "(3rd)"
         }
-        rank_map = ranked_results.set_index('source')['final_rank'].to_dict()
+        rank_map = ranked_results.set_index('source')[rank_method].to_dict()
         rank_map = {k: rank_icons.get(v) for k, v in rank_map.items() if v in rank_icons}
         return [f"{label} {rank_map.get(label, '')}" for label in data_labels]
     return data_labels
@@ -81,7 +81,7 @@ def plot_barplot(
         fig, ax = plt.subplots(figsize=(10, 5))
 
     if wraptext:
-        data[x] = data[x].apply(lambda x: '\n'.join(textwrap.wrap(str(x), width=15)))
+        data.loc[:, x] = data[x].apply(lambda x: '\n'.join(textwrap.wrap(str(x), width=15)))
 
     sns.barplot(x=x, y=y, hue=hue, data=data, ax=ax, width=barwidth)
     if ci_lower and ci_upper:
@@ -123,7 +123,8 @@ def plot_metric_summary(
     input_data: Union[pd.DataFrame, List[pd.DataFrame], Dict[str, pd.DataFrame]], 
     output_file: Optional[str] = None,
     data_labels: Optional[List[str]] = None,
-    ranked_results: Optional[Union[str, pd.DataFrame]] = None
+    ranked_results: Optional[Union[str, pd.DataFrame]] = None,
+    rank_method: str = "kemeny",
 ) -> None:
     """
     Plot metric summary for single or multiple DataFrames.
@@ -192,7 +193,6 @@ def plot_metric_summary(
 
     # Create figure & gridspec
     fig = plt.figure(figsize=(fig_width, fig_height), constrained_layout=True)
-    plt.subplots_adjust(left=0.1, right=0.9, top=0.9, bottom=0.2)
     gs = fig.add_gridspec(1, 3, width_ratios=widths, wspace=0.15)
 
     def safe_plot(ax_position: int, df: Optional[pd.DataFrame], y_label: str, sharey: Optional[matplotlib.axes.Axes] = None) -> Optional[matplotlib.axes.Axes]:
@@ -259,7 +259,7 @@ def plot_metric_summary(
         handles, labels = first_ax.get_legend_handles_labels()
 
         # Add rank to labels if ranked results are provided
-        labels = add_ranks(ranked_results, labels)
+        labels = add_ranks(ranked_results, rank_method, labels)
 
         fig.legend(
             handles,

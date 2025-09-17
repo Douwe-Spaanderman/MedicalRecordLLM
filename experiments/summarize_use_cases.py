@@ -47,6 +47,9 @@ custom_params = {
 sns.set_theme(style=style, rc=custom_params, palette=sns.color_palette(palette))
 
 model_sizes = {
+    'DeepSeek-R1-0528': {'category': 'large', 'size': 685, 'name': 'DeepSeek R1 0528'},
+    'Llama-4-Maverick': {'category': 'large', 'size': 402, 'name': 'Llama-4 Maverick 17B 128E Instruct'},
+    'Qwen3-235B-A22B': {'category': 'large', 'size': 235, 'name': 'Qwen3 235B A22B'},
     'Llama3-Med42-70B': {'category': 'specialized', 'size': 70, 'name': 'Llama-3 Med42 70B'}, 
     'Llama-3_3-Nemotron-Super-49B-v1': {'category': 'medium', 'size': 49, 'name': 'Llama-3.3 Nemotron Super 49B v1'},
     'Llama-4-Scout-17B-16E': {'category': 'medium', 'size': 109, 'name': 'Llama-4 Scout 17B 16E'}, 
@@ -67,7 +70,7 @@ use_cases = {
     "STT_English": "Soft Tissue Tumours (English)",
     "STT_Dutch": "Soft Tissue Tumours (Dutch)",
     "Melanoma": "Melanoma",
-    "Colorectal": "Colorectal Tumors",
+    "CRLM": "Colorectal Tumors",
     "Unknown": "Unknown Use Case"
 }
 
@@ -115,7 +118,7 @@ def create_figures(
     
     # Order models by category and size
     def get_model_order(model_name):
-        category_order = {'medium': 0, 'small': 1, 'tiny': 2, 'specialized': 3}
+        category_order = {'large': 0, 'medium': 1, 'small': 2, 'tiny': 3, 'specialized': 4}
         return (category_order[model_sizes[model_name]['category']], -model_sizes[model_name]['size'])
     
     model_order = sorted(model_sizes.keys(), key=get_model_order)
@@ -226,7 +229,7 @@ def create_custom_legend(fig, marker: bool = False) -> None:
     start_y = 1.1
     title_spacing = 0.05
     
-    for col, category in enumerate(['medium', 'small', 'tiny', 'specialized']): # TODO missing 'large' category
+    for col, category in enumerate(['large', 'medium', 'small', 'tiny', 'specialized']): # TODO missing 'large' category
         if category not in categories:
             continue
         
@@ -482,6 +485,13 @@ if __name__ == "__main__":
         type=Path,
         default=Path("/home/dspaanderman/Mount/LLM/Experiments"),
         help="Path to the root directory containing use case folders."
+    )
+    parser.add_argument(
+        "--ranking_method",
+        type=str,
+        default="kemeny",
+        choices=["borda", "kemeny", "ranked_pairs", "wilcoxon_stouffer"],
+        help="Method for rank aggregation."
     )
     args = parser.parse_args()
 

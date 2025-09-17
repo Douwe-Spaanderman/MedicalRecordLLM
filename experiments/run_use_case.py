@@ -12,6 +12,8 @@ from typing import List, Dict, Optional, Any
 from collections import defaultdict
 from glob import glob
 import re
+import concurrent.futures
+from itertools import product
 
 try:
     project_root = Path(__file__).resolve().parents[1]
@@ -72,6 +74,7 @@ class ExperimentRunner:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.performance_files = defaultdict(list)
         self.ranked_results = {}
+        self.concurrent = 18 if self.measurement_run else False # Hardcoded for now, TODO: make configurable
         self.logger = logging.getLogger(__name__)
         if self.dry_run:
             self.logger.info(f"[Dry Run] activated, no prompting or calculations will be done")
@@ -153,28 +156,77 @@ class ExperimentRunner:
         2. Run experiments for each prompt method and model configuration.
         3. Calculate performance metrics for each experiment.
         """
-        for model_config_path in self.model_configs:
-            model_config = self.read_config(model_config_path)
-            model_name = model_config.get("model", model_config_path.stem).split("/")[-1]
-            vllm_process = None
-            if self.vllm_server:
-                vllm_process = self.start_vllm_server(model_config)
+        if self.concurrent:
+            all_combinations = list(product(self.model_configs, self.prompt_methods))
 
-            try:
-                self.wait_for_vllm_ready(timeout=self.vllm_timeout)
-            except TimeoutError as e:
-                self.logger.error(f"[Error] vLLM server did not start in time for model {model_config('model', model_config_path.stem)}")
-                if vllm_process:
+            # Parallel execution
+            with concurrent.futures.ProcessPoolExecutor(max_workers=self.concurrent) as executor:
+                futures = {}
+                
+                # Track active vLLM processes by model
+                active_vllm_processes = {}
+                
+                for model_config_path, prompt_method in all_combinations:
+                    model_config = self.read_config(model_config_path)
+                    model_name = model_config.get("model", model_config_path.stem).split("/")[-1]
+                    
+                    # Start vLLM server if not already running for this model
+                    if model_name not in active_vllm_processes and self.vllm_server:
+                        vllm_process = self.start_vllm_server(model_config)
+                        active_vllm_processes[model_name] = vllm_process
+                        try:
+                            self.wait_for_vllm_ready(timeout=self.vllm_timeout)
+                        except TimeoutError as e:
+                            self.logger.error(f"[Error] vLLM server did not start in time for model {model_name}")
+                            if vllm_process:
+                                self.kill_vllm_server(vllm_process)
+                            continue
+                    
+                    # Submit task for execution
+                    future = executor.submit(
+                        self.run_single_experiment_wrapper,
+                        prompt_method, model_config_path, model_config
+                    )
+                    futures[future] = (model_config_path, prompt_method, model_name)
+                
+                # Process results as they complete
+                for future in concurrent.futures.as_completed(futures):
+                    model_config_path, prompt_method, model_name = futures[future]
+                    try:
+                        result = future.result()
+                        self.logger.info(f"[Completed] {model_name} with {prompt_method}")
+                    except Exception as e:
+                        self.logger.error(f"[Error] Failed to run {model_name} with {prompt_method}: {e}")
+                
+                # Clean up vLLM servers
+                for model_name, vllm_process in active_vllm_processes.items():
+                    if vllm_process or (self.dry_run and not self.measurement_run):
+                        self.kill_vllm_server(vllm_process)
+                        self.logger.info(f"[Stopped] vLLM server for {model_name}")
+        else:
+            # Sequential execution
+            for model_config_path in self.model_configs:
+                model_config = self.read_config(model_config_path)
+                model_name = model_config.get("model", model_config_path.stem).split("/")[-1]
+                vllm_process = None
+                if self.vllm_server:
+                    vllm_process = self.start_vllm_server(model_config)
+
+                try:
+                    self.wait_for_vllm_ready(timeout=self.vllm_timeout)
+                except TimeoutError as e:
+                    self.logger.error(f"[Error] vLLM server did not start in time for model {model_config('model', model_config_path.stem)}")
+                    if vllm_process:
+                        self.kill_vllm_server(vllm_process)
+                    continue
+
+                for prompt_method in self.prompt_methods:
+                    self.run_single_experiment(prompt_method, model_config_path, model_config)
+
+                if vllm_process or self.dry_run and not self.measurement_run:
                     self.kill_vllm_server(vllm_process)
-                continue
 
-            for prompt_method in self.prompt_methods:
-                self.run_single_experiment(prompt_method, model_config_path, model_config)
-
-            if vllm_process or self.dry_run and not self.measurement_run:
-                self.kill_vllm_server(vllm_process)
-
-            self.logger.info(f"[Completed] All experiments for model {model_config.get('model', model_config_path.stem)}")
+                self.logger.info(f"[Completed] All experiments for model {model_config.get('model', model_config_path.stem)}")
 
     def start_vllm_server(self, model_config: Dict[str, Any]) -> Optional[subprocess.Popen]:
         """
@@ -262,6 +314,10 @@ class ExperimentRunner:
         except subprocess.TimeoutExpired:
             process.kill()
         self.logger.info("[Killed] vLLM server")
+
+    def run_single_experiment_wrapper(self, prompt_method, model_config_path, model_config):
+        """Wrapper method for parallel execution"""
+        return self.run_single_experiment(prompt_method, model_config_path, model_config)
 
     def run_single_experiment(self, prompt_method: str, model_config_path: Path, model_config: Dict[str, Any]):
         """
@@ -445,11 +501,11 @@ class ExperimentRunner:
         for model_name, method_files in self.performance_files.items():
             files = [str(f) for _, f in method_files]
             out_file = self.output_dir / model_name / "ranked_results.csv"
-            self.rank(files, model_name, out_file, method="kemeny")
+            self.rank(files, model_name, out_file)
 
         self.logger.info("[Ranking] Rank aggregation completed.")
 
-    def rank(self, input_files: List[str], model_name: str, output_file: Optional[Path] = None, method: str = "kemeny"):
+    def rank(self, input_files: List[str], model_name: str, output_file: Optional[Path] = None, methods: List[str] = ["borda", "kemeny", "ranked_pairs", "wilcoxon_stouffer"]):
         """
         Rank aggregation of multiple LLM performance files.
 
@@ -457,16 +513,16 @@ class ExperimentRunner:
             input_files (List[str]): List of paths to the LLM performance files.
             model_name (str): name of model
             output_file (Optional[Path]): Path to save the aggregated results. Defaults to None.
-            method (str): Method for rank aggregation. Defaults to "kemeny".
-                Options are "borda", "kemeny", or "ranked_pairs".
+            methods (list[str], optional): List of methods for rank aggregation.
+                Options are "borda", "kemeny", "ranked_pairs", "wilcoxon_stouffer".
         """
         command = [
             self.python_cmd, str(project_root / "evaluation" / "rank_aggregation.py"),
             "-i"
         ] + input_files + [
             "-o", str(output_file),
-            "-m", method
-        ]
+            "-m"
+        ] + methods
 
         if self.dry_run:
             self.logger.info("[Dry Run] Would run rank aggregation with command: " + " ".join(command))
@@ -603,7 +659,10 @@ if __name__ == "__main__":
         "--python-cmd", type=str, default="python", help="Command for python binary."
     )
     parser.add_argument(
-        "--only-rank-all", action="store_true", help="Only run rank aggregation on existing performance files."
+        "--only-rank", action="store_true", help="Only run rank aggregation on existing performance files."
+    )
+    parser.add_argument(
+        "--only-visualize", action="store_true", help="Only run rank aggregation on existing performance files."
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Print commands without running them."
@@ -633,8 +692,10 @@ if __name__ == "__main__":
         python_cmd=args.python_cmd,
         dry_run=args.dry_run,
     )
-    if not args.only_rank_all:
+    if not args.only_rank and not args.only_visualize:
         runner.run()
-        
-    runner.run_ranking()
+
+    if not args.only_visualize:
+        runner.run_ranking()
+
     runner.run_visualization()

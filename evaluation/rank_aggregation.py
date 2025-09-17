@@ -4,13 +4,13 @@ from pathlib import Path
 import itertools
 import networkx as nx
 from collections import defaultdict
-from glob import glob
-import re
 from tqdm.auto import tqdm
 import math
 import numpy as np
 from scipy import stats
 from scipy.stats import wilcoxon
+from scipy.cluster import hierarchy
+from scipy.spatial.distance import squareform
 
 def pairwise_preferences(votes):
     """
@@ -116,7 +116,7 @@ def wilcoxon_stouffer_ranking(results_df, metric="mean", alpha=0.05):
                 if len(sys1_scores) > 0 and len(sys2_scores) > 0:
                     try:
                         # Perform Wilcoxon signed-rank test
-                        stat, p_val = wilcoxon(sys1_scores, sys2_scores, 
+                        stat, p_val = wilcoxon(sys1_scores[0], sys2_scores[0], 
                                              alternative='two-sided', zero_method='zsplit')
                         p_values.append(p_val)
                         # Convert p-value to z-score for Stouffer's method
@@ -141,6 +141,10 @@ def wilcoxon_stouffer_ranking(results_df, metric="mean", alpha=0.05):
                     else:  # sys2 wins
                         win_matrix[i, j] = -1
                         win_matrix[j, i] = 1
+                else:
+                    # No significant difference (tie)
+                    win_matrix[i, j] = 0
+                    win_matrix[j, i] = 0
     
     # Calculate wins and losses for each system
     wins = np.sum(win_matrix == 1, axis=1)
@@ -155,16 +159,34 @@ def wilcoxon_stouffer_ranking(results_df, metric="mean", alpha=0.05):
         bottom_rank = n_systems - wins[i]
         rank_ranges.append((top_rank, bottom_rank))
     
-    # Create clusters using hierarchical clustering based on win matrix
-    from scipy.cluster import hierarchy
-    from scipy.spatial.distance import squareform
+    # Create a proper distance matrix for clustering
+    # We need to ensure symmetry - use the absolute win differences
+    similarity_matrix = np.zeros((n_systems, n_systems))
     
-    # Convert win matrix to distance matrix (systems that win against each other are closer)
-    distance_matrix = 1 - (win_matrix + 1) / 2  # Convert [-1, 0, 1] to [1, 0.5, 0]
+    for i in range(n_systems):
+        for j in range(n_systems):
+            if i != j:
+                # Convert win/loss to similarity (1 for win, 0.5 for tie, 0 for loss)
+                if win_matrix[i, j] == 1:
+                    similarity_matrix[i, j] = 1
+                elif win_matrix[i, j] == 0:
+                    similarity_matrix[i, j] = 0.5
+                else:
+                    similarity_matrix[i, j] = 0
+    
+    # Convert similarity to distance (1 - similarity)
+    distance_matrix = 1 - similarity_matrix
+    
+    # Ensure the matrix is symmetric
+    distance_matrix = (distance_matrix + distance_matrix.T) / 2
     
     # Perform hierarchical clustering
-    linkage_matrix = hierarchy.linkage(squareform(distance_matrix), method='average')
-    clusters = hierarchy.fcluster(linkage_matrix, t=0.5, criterion='distance')
+    try:
+        linkage_matrix = hierarchy.linkage(squareform(distance_matrix), method='average')
+        clusters = hierarchy.fcluster(linkage_matrix, t=0.5, criterion='distance')
+    except:
+        # Fallback: if distance matrix issues persist, assign each system to its own cluster
+        clusters = np.arange(1, n_systems + 1)
     
     # Create final ranking (lower cluster number = better rank)
     cluster_ranks = {}
@@ -181,7 +203,7 @@ def wilcoxon_stouffer_ranking(results_df, metric="mean", alpha=0.05):
         
         for rank_offset, (sys, _) in enumerate(cluster_perf):
             # Assign rank based on cluster and within-cluster position
-            cluster_ranks[sys] = cluster_id * 100 + rank_offset  # Scale to preserve cluster ordering
+            cluster_ranks[sys] = cluster_id * 100 + rank_offset
     
     # Convert to final ranks (1 = best)
     final_ranks = {}
@@ -197,15 +219,15 @@ def wilcoxon_stouffer_ranking(results_df, metric="mean", alpha=0.05):
         'p_value_matrix': p_value_matrix
     }
 
-def rank(LLM_outputs:List[Path], output_file:bool = None, method:str = "borda", metric:str = "mean"):
+def rank(LLM_outputs:List[Path], output_file:bool = None, methods: List[str] = ["kemeny"], metric:str = "mean"):
     """
     Rank aggregation of multiple LLM performance files.
     
     Args:
         LLM_outputs (list): List of paths to the LLM performance files.
         output_file (str, optional): Path to save the aggregated results. Defaults to None.
-        method (str, optional): Method for rank aggregation. Defaults to "borda".
-            Options are "borda", "kemeny", or "ranked_pairs".
+        methods (list[str], optional): List of methods for rank aggregation.
+            Options are "borda", "kemeny", "ranked_pairs", "wilcoxon_stouffer".
         metric (str, optional): Metric to use for ranking. Defaults to "mean".
             Options are "mean", "precision", "recall", "f1", etc.
     """
@@ -220,65 +242,61 @@ def rank(LLM_outputs:List[Path], output_file:bool = None, method:str = "borda", 
     for output in LLM_outputs:
         if not output.suffix == '.csv':
             raise ValueError(f"Invalid file format: {output}. Expected a CSV file.")
-        
-        # Read and concatenate all CSV files
-        df = pd.read_csv(output)
-        df["source"] = output.with_suffix('').stem  # Add a column to identify the source file
-        df = df[df["metric_type"] != "micro_avgs"]  # Exclude the "All fields" row
+
+        df = pd.read_csv(output, converters={"all_scores": lambda x: np.fromstring(x.strip("[]"), sep=" ")})
+        df["source"] = output.with_suffix('').stem
+        df = df[~df["metric_type"].isin(["micro_avg", "macro_avg"])]  # Exclude the "All fields" row
         results.append(df)
 
     results = pd.concat(results, ignore_index=True)
 
-    ranks = {}
-    # Perform rank aggregation based on the specified method
-    for field in results["field"].unique():
-        field_results = results[results["field"] == field].copy()
+    # Prepare rank DataFrame: index = source, columns = methods
+    rank_df = pd.DataFrame(index=results["source"].unique())
+
+    for method in methods:
         if method == "borda":
-            # Borda count method
-            field_results['rank'] = field_results[metric].rank(ascending=False, method='min')
-            ranks[field] = field_results[['source', 'rank']].set_index('source').to_dict()['rank']
+            # Average Borda score across all fields
+            results['rank'] = results.groupby("field")[metric].rank(
+                ascending=False, method='min'
+            ).astype(int)
+            mean_ranks = results.groupby("source")["rank"].mean().rank().astype(int)
+            rank_df[method] = mean_ranks
+
         elif method == "kemeny":
-            # Kemedy-Young method
-            vote = list(field_results.sort_values(metric, ascending=False)["source"])
-            final_order = kemeny_young_aggregation([vote])
-            rank_map = {source: i + 1 for i, source in enumerate(final_order)}
-            field_results["rank"] = field_results["source"].map(rank_map)
-            ranks[field] = field_results[["source", "rank"]].set_index('source').to_dict()['rank']
+            # Build votes = list of rankings per field
+            votes = []
+            for field, field_results in results.groupby("field"):
+                vote = list(field_results.sort_values(metric, ascending=False)["source"])
+                votes.append(vote)
+            final_order = kemeny_young_aggregation(votes)
+            rank_map = {src: i+1 for i, src in enumerate(final_order)}
+            rank_df[method] = pd.Series(rank_map)
+
         elif method == "ranked_pairs":
-            # Ranked Pairs method
-            vote = list(field_results.sort_values(metric, ascending=False)["source"])
-            final_order = ranked_pairs_aggregation([vote], desc=f"Ranking {field:<20}")
-            rank_map = {source: i + 1 for i, source in enumerate(final_order)}
-            field_results["rank"] = field_results["source"].map(rank_map)
-            ranks[field] = field_results[["source", "rank"]].set_index('source').to_dict()['rank']
+            votes = []
+            for field, field_results in results.groupby("field"):
+                vote = list(field_results.sort_values(metric, ascending=False)["source"])
+                votes.append(vote)
+            final_order = ranked_pairs_aggregation(votes, desc="Ranked Pairs")
+            rank_map = {src: i+1 for i, src in enumerate(final_order)}
+            rank_df[method] = pd.Series(rank_map)
+
         elif method == "wilcoxon_stouffer":
-            # Wilcoxon signed-rank test with Stouffer's Z-score method
-            ranking_result = wilcoxon_stouffer_ranking(field_results, metric=metric, alpha=alpha)
-            field_results["rank"] = field_results["source"].map(ranking_result['ranks'])
-            ranks[field] = field_results[["source", "rank"]].set_index('source').to_dict()['rank']
-            
-            # Also store additional information for this method
-            ranks[field + '_clusters'] = ranking_result['clusters']
-            ranks[field + '_rank_ranges'] = ranking_result['rank_ranges']
+            # TODO: fix this, please don't use at this moment
+            ranking_result = wilcoxon_stouffer_ranking(results, metric="all_scores")
+            rank_df[method] = pd.Series(ranking_result['ranks'])
         else:
             raise ValueError(f"Unknown aggregation method: {method}")
-        
-    # Convert ranks to DataFrame
-    rank_df = pd.DataFrame.from_dict(ranks, orient='index')
-    score_df = rank_df.sum(axis=0).to_frame(name='total_rank')
-    score_df['final_rank'] = score_df['total_rank'].rank(ascending=True, method='min')
-    score_df = score_df.sort_values('final_rank')
-    score_df.index.name = 'source'
-    score_df = score_df.reset_index()
+            
+    rank_df = rank_df.reset_index().rename(columns={"index": "source"})
 
     if output_file:
-        score_df.to_csv(output_file, index=False)
+        rank_df.to_csv(output_file, index=False)
     else:
-        print("Final aggregated scores:")
-        print(score_df)
-        winner = score_df.index[0]
-        print(f"\n🏆 Final Winner: {winner}")
-
+        print("Aggregated ranks by method:")
+        print(rank_df)
+        return rank_df
+    
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Rank aggregation of multiple LLM performance.")
@@ -301,7 +319,8 @@ if __name__ == "__main__":
         "-m",
         "--method",
         type=str,
-        default="kemeny",
+        nargs='+',
+        default=["borda", "kemeny", "ranked_pairs", "wilcoxon_stouffer"],
         choices=["borda", "kemeny", "ranked_pairs", "wilcoxon_stouffer"],
         help="Method for rank aggregation."
     )
