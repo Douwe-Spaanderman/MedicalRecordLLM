@@ -205,13 +205,19 @@ def calculate_results(
         prediction_field = prediction[field].copy()
         ground_truth_field = ground_truth[field].copy()
 
-        if type_value in {"number", "float"}:
-            # Numeric exact match
-            prediction_field = pd.to_numeric(prediction_field, errors='coerce', downcast="float")
-            ground_truth_field = pd.to_numeric(ground_truth_field, errors='coerce', downcast="float")
+        def try_float(x):
+            try:
+                return float(x)
+            except (ValueError, TypeError):
+                return x
 
-        y_true = ground_truth_field.astype(str)
+        if type_value in {"number", "float", "categorical_number"}:
+            # Numeric exact match
+            prediction_field = prediction_field.apply(try_float)
+            ground_truth_field = ground_truth_field.apply(try_float)            
+
         y_pred = prediction_field.astype(str)
+        y_true = ground_truth_field.astype(str)
 
         # Exclude default values if specified for strict metrics
         if strict_metrics:
