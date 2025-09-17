@@ -376,11 +376,13 @@ def calculate_results(
     # Calculate macro average
     if n_bootstrap > 1:
         # stack all bootstrap scores across fields
-        all_bootstrap_scores = np.concatenate([r["all_scores"] for r in results])
+        all_bootstrap_scores = np.stack([r["all_scores"] for r in results])
 
-        macro_mean = np.mean(all_bootstrap_scores)
-        ci_low = np.percentile(all_bootstrap_scores, 2.5)
-        ci_high = np.percentile(all_bootstrap_scores, 97.5)
+        macro_per_bootstrap = all_bootstrap_scores.mean(axis=0)
+
+        macro_mean = macro_per_bootstrap.mean()
+        ci_low = np.percentile(macro_per_bootstrap, 2.5)
+        ci_high = np.percentile(macro_per_bootstrap, 97.5)
     else:
         # take per-field means
         field_means = np.array([r["mean"] for r in results])
