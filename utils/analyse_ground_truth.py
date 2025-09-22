@@ -8,6 +8,7 @@ import seaborn as sns
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.manifold import TSNE
+from adjustText import adjust_text
 import textwrap
 
 # --- Custom Style Parameters ---
@@ -61,7 +62,7 @@ def tsne_text_distribution(
         texts = rng.choice(texts, size=sample_size, replace=False).tolist()
 
     # Encode texts with SentenceTransformer
-    model = SentenceTransformer("all-mpnet-base-v2")
+    model = SentenceTransformer("embeddinggemma-300m-medical")
     embeddings = model.encode(texts, show_progress_bar=True)
 
     if perplexity > (len(embeddings) - 1) / 3:
@@ -86,6 +87,17 @@ def tsne_text_distribution(
     plt.xticks([])
     plt.xlabel("t-SNE dimension 1")
     plt.ylabel("t-SNE dimension 2")
+    # Add labels (deduplicate identical texts)
+    seen = set()
+    texts_to_annotate = []
+    for (x, y, txt) in zip(reduced[:, 0], reduced[:, 1], texts):
+        if txt not in seen:  # only annotate first occurrence
+            texts_to_annotate.append(ax.text(x, y, txt, fontsize=6, alpha=0.7))
+            seen.add(txt)
+
+    # Adjust labels to reduce overlap
+    adjust_text(texts_to_annotate, ax=ax)
+
     fig.tight_layout(rect=[0.02, 0, 1, 1])
     plt.savefig(output_file, dpi=300)
     plt.close()

@@ -170,3 +170,4 @@ setup.sh
 slurm/*
 todo.txt
 run.sh
+analyse_gt.sh

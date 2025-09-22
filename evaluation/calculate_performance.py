@@ -413,7 +413,7 @@ def process_results(
     LLM_output: Union[pd.DataFrame, str], 
     prompt_config: Union[Dict[str, Any], str], 
     ground_truth: Optional[Union[pd.DataFrame, str]] = None, 
-    sentence_model: str = "all-mpnet-base-v2", 
+    sentence_model: str = "embeddinggemma-300m-medical", 
     scoring_weights: Optional[List[int]] = None, 
     output_file: Optional[str] = None,
     n_bootstrap: int = 1000,
@@ -511,7 +511,7 @@ if __name__ == "__main__":
         "-m",
         "--sentence-model",
         type=str,
-        default="all-mpnet-base-v2",
+        default="embeddinggemma-300m-medical",
         help="Sentence transformer model to use for semantic mapping."
     )
     parser.add_argument(

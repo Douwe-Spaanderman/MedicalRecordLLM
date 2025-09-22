@@ -11,6 +11,22 @@ from scipy import stats
 from scipy.stats import wilcoxon
 from scipy.cluster import hierarchy
 from scipy.spatial.distance import squareform
+import ast
+
+def safe_literal_eval(x):
+    try:
+        # Handle empty values
+        if pd.isna(x) or x.strip() in ['[]', '', 'nan']:
+            return np.array([])
+        
+        # Parse as Python literal
+        parsed = ast.literal_eval(x)
+        if isinstance(parsed, list):
+            return np.array(parsed)
+        else:
+            return np.array([])
+    except (ValueError, SyntaxError, TypeError):
+        return np.array([])
 
 def pairwise_preferences(votes):
     """
@@ -55,6 +71,7 @@ def kemeny_young_aggregation(votes):
 
     n_perm_zeros = math.log10(math.factorial(len(items)))
     if n_perm_zeros > 9:
+        import ipdb; ipdb.set_trace()
         raise ValueError(f"Too many votes: {len(items)}. Would result in > 1e{n_perm_zeros:d} permutations. Use a different method.")
     
     all_perms = list(itertools.permutations(items))
@@ -219,7 +236,7 @@ def wilcoxon_stouffer_ranking(results_df, metric="mean", alpha=0.05):
         'p_value_matrix': p_value_matrix
     }
 
-def rank(LLM_outputs:List[Path], output_file:bool = None, methods: List[str] = ["kemeny"], metric:str = "mean"):
+def rank(LLM_outputs:List[Path], output_file:bool = None, methods: List[str] = ["kemeny"], metric:str = "mean", include_LLM: bool = False):
     """
     Rank aggregation of multiple LLM performance files.
     
@@ -230,6 +247,7 @@ def rank(LLM_outputs:List[Path], output_file:bool = None, methods: List[str] = [
             Options are "borda", "kemeny", "ranked_pairs", "wilcoxon_stouffer".
         metric (str, optional): Metric to use for ranking. Defaults to "mean".
             Options are "mean", "precision", "recall", "f1", etc.
+        include_LLM (bool): Bool whether to only look at prompting strategy or also LLM.
     """
     # Load all LLM outputs into a DataFrame
     if not LLM_outputs:
@@ -243,8 +261,11 @@ def rank(LLM_outputs:List[Path], output_file:bool = None, methods: List[str] = [
         if not output.suffix == '.csv':
             raise ValueError(f"Invalid file format: {output}. Expected a CSV file.")
 
-        df = pd.read_csv(output, converters={"all_scores": lambda x: np.fromstring(x.strip("[]"), sep=" ")})
-        df["source"] = output.with_suffix('').stem
+        df = pd.read_csv(output, converters={"all_scores": safe_literal_eval})
+        if include_LLM:
+            df["source"] = output.parents[0].name + " - " + output.with_suffix('').stem
+        else:
+            df["source"] = output.with_suffix('').stem
         df = df[~df["metric_type"].isin(["micro_avg", "macro_avg"])]  # Exclude the "All fields" row
         results.append(df)
 
@@ -283,8 +304,9 @@ def rank(LLM_outputs:List[Path], output_file:bool = None, methods: List[str] = [
 
         elif method == "wilcoxon_stouffer":
             # TODO: fix this, please don't use at this moment
-            ranking_result = wilcoxon_stouffer_ranking(results, metric="all_scores")
-            rank_df[method] = pd.Series(ranking_result['ranks'])
+            pass
+            #ranking_result = wilcoxon_stouffer_ranking(results, metric="all_scores")
+            #rank_df[method] = pd.Series(ranking_result['ranks'])
         else:
             raise ValueError(f"Unknown aggregation method: {method}")
             

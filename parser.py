@@ -391,7 +391,7 @@ class VLLMReportParser:
         max_concurrent: int = 32,
         select_example: Optional[str] = None,
         patterns_path: Optional[str] = None,
-        sentence_model: str = "all-mpnet-base-v2",
+        sentence_model: str = "embeddinggemma-300m-medical",
         save_raw_output: bool = False,
         verbose: bool = False,
         dry_run: bool = False
@@ -434,7 +434,7 @@ class VLLMReportParser:
         self.timeout = timeout
         if prompt_method == "SelfConsistency":
             self.ensemble_chain = FastEnsemble(
-                embedding_model = params_config.get('embedding_model', 'all-mpnet-base-v2')
+                embedding_model = params_config.get('embedding_model', 'embeddinggemma-300m-medical')
             )
 
         self.max_concurrent = max_concurrent
@@ -1032,7 +1032,7 @@ class VLLMReportParser:
 
         # Build field instructions
         field_instructions = []
-        chain_indexes = []
+        chain_indexes = [] 
         output_format = {}
         for idx, field in enumerate(self.prompt_config['field_instructions'], start=1):
             field_instruction, output_format = self._format_field_instruction(field, idx, chain, output_format)

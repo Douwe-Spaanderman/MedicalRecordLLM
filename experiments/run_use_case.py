@@ -74,7 +74,7 @@ class ExperimentRunner:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.performance_files = defaultdict(list)
         self.ranked_results = {}
-        self.concurrent = 18 if self.measurement_run else False # Hardcoded for now, TODO: make configurable
+        self.concurrent = False if self.measurement_run else False # Hardcoded for now, TODO: make configurable
         self.logger = logging.getLogger(__name__)
         if self.dry_run:
             self.logger.info(f"[Dry Run] activated, no prompting or calculations will be done")
@@ -394,7 +394,7 @@ class ExperimentRunner:
             "-l", str(llm_output_path),
             "-p", str(self.prompt_config_path),
             "-o", str(perf_output_path),
-            "--bootstrap", "1000",
+            "--bootstrap", "5",
         ]
         if self.balanced_accuracy:
             command.extend([
@@ -430,8 +430,18 @@ class ExperimentRunner:
            return
 
         if not self.performance_files:
-            self.logger.info("[Visualize] No performance files found to visualize.")
-            return
+            self.logger.info("[Visualize] No performance files found to visualize, attempting to gather...")
+            self.gather_performance_files()
+            if not self.performance_files:
+                self.logger.info("[Visualize] Still no performance files found to visualize.")
+                return
+            
+        if not self.ranked_results:
+            self.logger.info("[Visualize] No ranking files found to visualize, attempting to gather...")
+            self.gather_ranked_files()
+            if not self.performance_files:
+                self.logger.info("[Visualize] Still no ranking files found to visualize.")
+                return
         
         self.logger.info("[Visualize] Starting visualization of performance results...")
 
@@ -546,6 +556,20 @@ class ExperimentRunner:
             m = re.match(fr"{base_path}/(.*)/(.*).performance.csv", path)
             model_name, prompt_method = m.groups()
             self.performance_files[model_name].append((prompt_method, path))
+
+        # Order performance_files on prompt order
+        prompt_order = ['ZeroShot', 'OneShot', 'FewShot', 'CoT', 'SelfConsistency', 'PromptGraph']
+        prompt_order_map = {prompt: idx for idx, prompt in enumerate(prompt_order)}
+        for model_name in self.performance_files:
+            self.performance_files[model_name].sort(key=lambda x: prompt_order_map.get(x[0], float('inf')))
+
+    def gather_ranked_files(self):
+        base_path = self.output_dir
+
+        for path in glob(f"{base_path}/*/ranked_results.csv"):
+            m = re.match(fr"{base_path}/(.*)/ranked_results.csv", path)
+            model_name = m.group(1)  
+            self.ranked_results[model_name] = str(path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run all LLM experiments.")
