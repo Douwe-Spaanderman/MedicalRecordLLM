@@ -9,6 +9,27 @@ import statistics
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from adjustText import adjust_text
+from matplotlib.patches import Circle, Patch
+
+models = {
+    'deepseek-ai/DeepSeek-R1-0528': {'category': 'large', 'size': 685, 'name': 'DeepSeek R1 0528', 'performance': 0.763104, 'GPU': '16x H100'},
+    'meta-llama/Llama-4-Maverick-17B-128E-Instruct': {'category': 'large', 'size': 402, 'name': 'Llama-4 Maverick 17B 128E Instruct', 'performance': 0.810003, 'GPU': '16x H100'},
+    'Qwen/Qwen3-235B-A22B': {'category': 'large', 'size': 235, 'name': 'Qwen3 235B A22B', 'performance': 0.772821, 'GPU': '16x H100'},
+    'm42-health/Llama3-Med42-70B': {'category': 'specialized', 'size': 70, 'name': 'Llama-3 Med42 70B', 'performance': 0.750560, 'GPU': '4x H100'}, 
+    'nvidia/Llama-3_3-Nemotron-Super-49B-v1': {'category': 'medium', 'size': 49, 'name': 'Llama-3.3 Nemotron Super 49B v1', 'performance': 0.776537, 'GPU': '4x H100'},
+    'meta-llama/Llama-4-Scout-17B-16E': {'category': 'medium', 'size': 109, 'name': 'Llama-4 Scout 17B 16E', 'performance': 0.760603, 'GPU': '4x H100'}, 
+    'Qwen/Qwen2.5-72B-Instruct': {'category': 'medium', 'size': 72, 'name': 'Qwen2.5 72B Instruct', 'performance': 0.786064, 'GPU': '4x H100'}, 
+    'aaditya/Llama3-OpenBioLLM-70B': {'category': 'specialized', 'size': 70, 'name': 'Llama-3 OpenBioLLM 70B', 'performance': 0.711920, 'GPU': '4x H100'}, 
+    'google/medgemma-27b-it': {'category': 'specialized', 'size': 27, 'name': 'MedGemma 27B IT', 'performance': 0.751876, 'GPU': '4x H100'}, 
+    'google/gemma-3-27b-it': {'category': 'small', 'size': 27, 'name': 'Gemma 3 27B IT', 'performance': 0.740504, 'GPU': '2x H100'},
+    'mistralai/Mistral-Small-3.1-24B-Instruct-2503': {'category': 'small', 'size': 24, 'name': 'Mistral Small 3.1 24B Instruct 2503', 'performance': 0.775343, 'GPU': '2x H100'}, 
+    'deepseek-ai/DeepSeek-R1-0528-Qwen3-8B': {'category': 'small', 'size': 8, 'name': 'DeepSeek R1 0528 Qwen3 8B', 'performance': 0.748488, 'GPU': '2x H100'},
+    'google/gemma-3-4b-it': {'category': 'tiny', 'size': 4, 'name': 'Gemma 3 4B IT', 'performance': 0.678262, 'GPU': '2x H100'},
+    'Qwen/Qwen3-1.7B': {'category': 'tiny', 'size': 1.7, 'name': 'Qwen3 1.7B', 'performance': 0.668524, 'GPU': '2x H100'},
+    'deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B': {'category': 'tiny', 'size': 1.5, 'name': 'DeepSeek R1 Distill Qwen 1.5B', 'performance': 0.419071, 'GPU': '2x H100'},
+}
+
 
 @dataclass
 class ThroughputRecord:
@@ -173,6 +194,7 @@ class PerformanceAnalyzer:
         
         for model, strategies in self.data.items():
             stats[model] = {}
+            num_gpus = self.parse_num_gpus(models.get(model, {}).get('GPU', '1x H100'))
             for strategy, records in strategies.items():
                 if not records:
                     continue
@@ -181,9 +203,23 @@ class PerformanceAnalyzer:
                 gen_tput = [r.generation_throughput for r in records]
                 kv_cache = [r.kv_cache_usage for r in records]
                 cache_hit = [r.prefix_cache_hit_rate for r in records]
+
+                # Per timestep: per-GPU throughput and cache-adjusted throughput
+                per_gpu_tputs = [t / num_gpus for t in gen_tput]
+                corrected_tputs = [
+                    (t / num_gpus) / max(k / 100.0, 1e-3)  # clip denominator at 0.1%
+                    for t, k in zip(gen_tput, kv_cache)
+                ]
+
+                # Total time in seconds
+                times = [r.time for r in records]
+                time_required = (max(pd.to_datetime(times)) - min(pd.to_datetime(times))).total_seconds()
+                per_gpu_time_required = time_required * num_gpus
                 
                 stats[model][strategy] = {
                     'count': len(records),
+                    'time_required_sec': time_required,
+                    'time_required_per_gpu_sec': per_gpu_time_required,
                     'prompt_throughput_mean': statistics.mean(prompt_tput),
                     'prompt_throughput_median': statistics.median(prompt_tput),
                     'prompt_throughput_stdev': statistics.stdev(prompt_tput) if len(prompt_tput) > 1 else 0,
@@ -192,7 +228,13 @@ class PerformanceAnalyzer:
                     'generation_throughput_stdev': statistics.stdev(gen_tput) if len(gen_tput) > 1 else 0,
                     'avg_kv_cache_usage': statistics.mean(kv_cache),
                     'avg_cache_hit_rate': statistics.mean(cache_hit),
-                    'total_requests': sum(r.running + r.waiting for r in records)
+                    'total_requests': sum(r.running + r.waiting for r in records),
+                    'generation_throughput_per_gpu_mean': statistics.mean(per_gpu_tputs),
+                    'generation_throughput_per_gpu_median': statistics.median(per_gpu_tputs),
+                    'generation_throughput_per_gpu_stdev': statistics.stdev(per_gpu_tputs) if len(per_gpu_tputs) > 1 else 0,
+                    'cache_corrected_tput_per_gpu_mean': statistics.mean(corrected_tputs),
+                    'cache_corrected_tput_per_gpu_median': statistics.median(corrected_tputs),
+                    'cache_corrected_tput_per_gpu_stdev': statistics.stdev(corrected_tputs) if len(corrected_tputs) > 1 else 0,
                 }
         
         return stats
@@ -231,19 +273,22 @@ class PerformanceAnalyzer:
         if df.empty:
             print("No data to plot")
             return
+        
+        # Add the model name for better readability
+        df['model_name'] = df['model'].apply(lambda m: models.get(m, {}).get('name', m))
     
         plt.figure(figsize=(15, 6))
     
         # Prompt Throughput
         plt.subplot(1, 2, 1)
-        sns.barplot(data=df, x='strategy', y='prompt_throughput_mean', hue='model')
+        sns.barplot(data=df, x='strategy', y='prompt_throughput_mean', hue='model_name')
         plt.title('Average Prompt Throughput by Strategy')
         plt.ylabel('Tokens/s')
         plt.xticks(rotation=45)
     
         # Generation Throughput
         plt.subplot(1, 2, 2)
-        sns.barplot(data=df, x='strategy', y='generation_throughput_mean', hue='model')
+        sns.barplot(data=df, x='strategy', y='generation_throughput_mean', hue='model_name')
         plt.title('Average Generation Throughput by Strategy')
         plt.ylabel('Tokens/s')
         plt.xticks(rotation=45)
@@ -290,6 +335,181 @@ class PerformanceAnalyzer:
         else:
             plt.show()
 
+    def parse_num_gpus(self, gpu_str: str) -> int:
+        """Extract number of GPUs from a string like '16x H100'. Fall back to 1 if not found."""
+        if not isinstance(gpu_str, str):
+            return 1
+        match = re.match(r"\s*(\d+)\s*x", gpu_str, flags=re.IGNORECASE)
+        return int(match.group(1)) if match else 1
+
+    def plot_model_size_vs_performance(self, output_file: str = None) -> None:
+        """
+        Two-panel plot (FewShot only):
+        - left:  raw throughput per GPU (tokens/s)
+        - right: cache-adjusted potential throughput per GPU (tokens/s)
+        Bubble size = Number of parameters (in billions).
+        """
+        df = self.compare_strategies()
+        if df.empty:
+            print("No data to plot")
+            return
+
+        # Filter for FewShot only
+        df = df[df['strategy'] == 'FewShot']
+        if df.empty:
+            print("No FewShot data to plot")
+            return
+
+        # Add model metadata
+        df = df.copy()
+        df['model_size'] = df['model'].apply(lambda m: models.get(m, {}).get('size', 0))  # in billions
+        df['Model category'] = df['model'].apply(lambda m: models.get(m, {}).get('category', 'unknown')) + " (" + df['model'].apply(lambda m: models.get(m, {}).get('GPU', 'unknown')) + ")"
+        df['model_name'] = df['model'].apply(lambda m: models.get(m, {}).get('name', m))
+        df['performance'] = df['model'].apply(lambda m: models.get(m, {}).get('performance', None))
+
+        # Use the precomputed per-GPU metrics (from _calculate_summary_stats)
+        if 'generation_throughput_per_gpu_mean' not in df.columns:
+            print("Missing per-GPU metrics in DataFrame — did you run the updated _calculate_summary_stats?")
+            return
+
+        df['throughput_per_gpu'] = df['generation_throughput_per_gpu_mean']
+        df['potential_throughput_per_gpu'] = df['cache_corrected_tput_per_gpu_mean']
+
+        # Column used for bubble size and its displayed name
+        df['Number of parameters'] = df['model_size']  # in billions
+
+        # Bubble size mapping: seaborn will map the numbers to marker sizes between sizes=(min, max)
+        min_marker, max_marker = 50, 1000
+
+        # Create figure with two subplots
+        fig, (ax1, ax2) = plt.subplots(ncols=2, figsize=(14, 6), sharey=True)
+
+        # Common scatter kwargs
+        scatter_kwargs = dict(
+            alpha=0.75,
+            edgecolor='black',
+            linewidth=0.5,
+            sizes=(min_marker, max_marker),
+            palette='tab10',
+            legend='brief',
+        )
+
+        # Left: raw throughput per GPU
+        sns.scatterplot(
+            data=df,
+            x='throughput_per_gpu',
+            y='performance',
+            hue='Model category',
+            size='Number of parameters',
+            ax=ax1,
+            **scatter_kwargs
+        )
+        ax1.set_xscale('log')
+        ax1.set_xlabel('Raw Throughput per GPU (tokens/s)')
+        ax1.set_title('Measured Throughput per GPU')
+
+        # Right: cache-adjusted potential throughput per GPU
+        sns.scatterplot(
+            data=df,
+            x='potential_throughput_per_gpu',
+            y='performance',
+            hue='Model category',
+            size='Number of parameters',
+            ax=ax2,
+            
+            **scatter_kwargs
+        )
+        ax2.set_xscale('log')
+        ax2.set_xlabel('Cache-adjusted Potential Throughput per GPU (tokens/s)')
+        ax2.set_title('Potential Throughput per GPU (cache-adjusted)')
+
+        # Shared y label
+        ax1.set_ylabel('Performance (Mean Score)')
+        ax2.set_ylabel('') 
+
+        # Create text labels for each subplot and adjust them separately
+        texts_left, texts_right = [], []
+        for _, row in df.iterrows():
+            label = row['model_name']
+            texts_left.append(ax1.text(row['throughput_per_gpu'], row['performance'], label, fontsize=8))
+            texts_right.append(ax2.text(row['potential_throughput_per_gpu'], row['performance'], label, fontsize=8))
+
+        # Adjust texts with arrows to reduce overlaps
+        plt.sca(ax1)
+        adjust_text(texts_left, arrowprops=dict(arrowstyle='-', color='gray', lw=0.4))
+        plt.sca(ax2)
+        adjust_text(texts_right, arrowprops=dict(arrowstyle='-', color='gray', lw=0.4))
+
+        # Tidy up legends
+        ax1.legend_.remove()
+        handles, labels = ax2.get_legend_handles_labels()
+        model_category_handles = []
+        model_category_labels = []
+
+        # The first entry is the title "Model category", then categories, then "Number of parameters", then sizes
+        found_size_title = False
+        for i, (handle, label) in enumerate(zip(handles, labels)):
+            if label == 'Number of parameters':
+                found_size_title = True
+                continue
+            if found_size_title:
+                continue  # skip size handles
+            else:
+                if label != 'Model category':  # Skip the title itself
+                    model_category_handles.append(handle)
+                    model_category_labels.append(label)
+
+        # Order legend entries by category_order
+        category_order = ['large', 'medium', 'small', 'specialized', 'tiny']
+        ordered_handles_labels = sorted(
+            zip(model_category_handles, model_category_labels),
+            key=lambda x: category_order.index(x[1].split(" ")[0]) if x[1].split(" ")[0] in category_order else len(category_order)
+        )
+        model_category_handles, model_category_labels = zip(*ordered_handles_labels)
+
+        # Remove the original legend
+        ax2.legend_.remove()
+
+        # Create two separate legends
+        legend1 = ax2.legend(model_category_handles, model_category_labels,
+                            bbox_to_anchor=(1.02, 0.7), loc='center left',
+                            frameon=False)
+
+        size_breaks = [1, 50, 100, 500]  # billions
+        size_labels = [f"{s}B" for s in size_breaks]
+
+        # Map through same scaling Seaborn uses (linear between min/max)
+        def scale_size(val, vmin, vmax, smin, smax):
+            return smin + (smax - smin) * (val - vmin) / (vmax - vmin)
+
+        size_handles = [
+            plt.scatter([], [], s=scale_size(s, df['Number of parameters'].min(),
+                                            df['Number of parameters'].max(),
+                                            min_marker, max_marker),
+                        color='gray', edgecolor='black', alpha=0.7)
+            for s in size_breaks
+        ]
+
+        legend2 = ax2.legend(size_handles, size_labels,
+                            bbox_to_anchor=(1.01, 0.3), loc='center left',
+                            handletextpad=2.0,
+                            labelspacing=1.4,
+                            frameon=False)
+        # Add both legends to the plot
+        ax2.add_artist(legend1)
+        ax2.text(1.04, 0.83, 'Model category', transform=ax2.transAxes,
+                fontsize='medium', fontweight='bold', va='center', ha='left')
+
+        ax2.text(1.04, 0.45, 'Parameters (B)', transform=ax2.transAxes,
+                fontsize='medium', fontweight='bold', va='center', ha='left')
+
+        plt.tight_layout(rect=[0, 0, 0.94, 1])  # leave space on right for legends
+
+        if output_file:
+            plt.savefig(output_file, dpi=300)
+        else:
+            plt.show()
+
 if __name__ == "__main__":
     import argparse
     
@@ -328,3 +548,5 @@ if __name__ == "__main__":
     print(f"Average generation throughput: {best_value:.2f} tokens/s")
 
     analyzer.plot_throughput_comparison(Path(args.output) / "throughput_comparison.png")
+    analyzer.plot_model_size_vs_performance(Path(args.output) / "model_size_vs_performance.png")
+
