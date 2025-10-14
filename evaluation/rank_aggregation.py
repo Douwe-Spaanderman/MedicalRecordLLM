@@ -387,19 +387,20 @@ def rank(LLM_outputs:List[Path], output_file:bool = None, methods: List[str] = [
 
         ci_low = {}
         ci_high = {}
+        raw_ranks = {}
         for src, ranks in rank_samples.items():
             if ranks:
                 ci_low[src] = np.percentile(ranks, 2.5)
                 ci_high[src] = np.percentile(ranks, 97.5)
+                raw_ranks[src] = ranks
             else:
                 ci_low[src] = np.nan
                 ci_high[src] = np.nan
-
-        if include_LLM:
-            import ipdb; ipdb.set_trace()
+                raw_ranks[src] = []
 
         rank_df[f"{method}_ci_low"] = pd.Series(ci_low)
         rank_df[f"{method}_ci_high"] = pd.Series(ci_high)
+        rank_df[f"{method}_raw_ranks"] = pd.Series(raw_ranks)
 
     rank_df = rank_df.reset_index().rename(columns={"index": "source"})
 
