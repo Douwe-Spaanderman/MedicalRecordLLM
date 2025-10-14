@@ -17,6 +17,8 @@ import re
 import warnings
 from multiprocessing import Pool
 
+random.seed(42) # Seed for approximation
+
 def safe_literal_eval(x):
     try:
         if pd.isna(x) or str(x).strip() in ['[]', '', 'nan']:
@@ -79,7 +81,7 @@ def ranked_pairs_aggregation(votes, desc=None):
     ranking = list(nx.topological_sort(G))
     return ranking
 
-def kemeny_young_aggregation(votes, max_iter=1000, initial_temp=10000, cooling_rate=0.95):
+def kemeny_young_aggregation(votes, progress=True, max_iter=50000, initial_temp=100000, cooling_rate=0.99):
     """
     Kemeny-Young aggregation: brute-force for small N, simulated annealing for large N.
     Stops early if the optimal solution (score = 0) is found.
@@ -93,7 +95,8 @@ def kemeny_young_aggregation(votes, max_iter=1000, initial_temp=10000, cooling_r
         all_perms = list(itertools.permutations(items))
         best_score = float("inf")
         best_perm = None
-        for perm in all_perms:
+        iterator = tqdm(all_perms, desc="Brute-force search") if progress else all_perms
+        for perm in iterator:
             score = 0
             for vote in votes:
                 for i in range(len(perm)):
@@ -112,7 +115,8 @@ def kemeny_young_aggregation(votes, max_iter=1000, initial_temp=10000, cooling_r
         current_score = compute_kemeny_young_score(current_perm, votes)
 
         temp = initial_temp
-        for _ in range(max_iter):
+        iterator = tqdm(range(max_iter), desc="Simulated annealing") if progress else range(max_iter)
+        for _ in iterator:
             # Generate neighbor by reversing a random segment
             i, j = sorted(random.sample(range(n), 2))  # Ensure i <= j
             new_perm = current_perm.copy()
@@ -307,9 +311,9 @@ def bootstrap_iteration(args):
         warnings.warn("NaN values detected in the 'mean' column after bootstrap sampling. Returning NaN.")
         return {}
 
-    return aggregate_once(boot_df, method)
+    return aggregate_once(boot_df, method, progress=False)
 
-def aggregate_once(df, method):
+def aggregate_once(df, method, progress=True):
     if method == "borda":
         df["rank"] = df.groupby("field")["mean"].rank(ascending=False, method="min").astype(int)
         mean_ranks = df.groupby("source")["rank"].mean().rank().astype(int)
@@ -319,7 +323,7 @@ def aggregate_once(df, method):
         for field, field_results in df.groupby("field"):
             vote = list(field_results.sort_values("mean", ascending=False)["source"])
             votes.append(vote)
-        final_order = kemeny_young_aggregation(votes)
+        final_order = kemeny_young_aggregation(votes, progress=progress)
         return {src: i + 1 for i, src in enumerate(final_order)}
     elif method == "ranked_pairs":
         votes = []
@@ -375,7 +379,7 @@ def rank(LLM_outputs:List[Path], output_file:bool = None, methods: List[str] = [
         mean_df = results.copy()
         rank_map = aggregate_once(mean_df, method)
         rank_df[method] = pd.Series(rank_map)
-        n_boot = min(min(len(x) for x in results["all_scores"] if isinstance(x, np.ndarray) and len(x) > 0), 100)
+        n_boot = min(min(len(x) for x in results["all_scores"] if isinstance(x, np.ndarray) and len(x) > 0), 1000)
         if n_boot == 0:
             continue
         rank_samples = {src: [] for src in rank_df.index}
