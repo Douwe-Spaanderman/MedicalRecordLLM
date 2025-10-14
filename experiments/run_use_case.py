@@ -157,6 +157,7 @@ class ExperimentRunner:
         3. Calculate performance metrics for each experiment.
         """
         if self.concurrent and self.concurrent > 1:
+            self.logger.info(f"Running experiments parallel with {self.concurrent} concurrent jobs")
             all_combinations = list(product(self.model_configs, self.prompt_methods))
 
             # Parallel execution
