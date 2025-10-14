@@ -21,17 +21,24 @@ def safe_literal_eval(x):
     try:
         if pd.isna(x) or str(x).strip() in ['[]', '', 'nan']:
             return np.array([])
-        
+
         # Ensure x is a string
         s = str(x).strip()
-        
-        # Replace multiple spaces with commas (but not those after '[' or before ']')
-        s = re.sub(r'\s+', ',', s.strip('[]'))
+
+        # Handle np.float64 cases: remove 'np.float64(' and ')'
+        s = re.sub(r'np\.float64\(([^)]+)\)', r'\1', s)
+
+        # Remove any extra commas and spaces
+        s = re.sub(r'[\s,]+', ',', s)
+
+        # Strip any leading/trailing brackets and add them back
+        s = s.strip('[]')
+        s = re.sub(r',{2,}', ',', s)  # Remove multiple commas
         s = f"[{s}]"
-        
+
         parsed = ast.literal_eval(s)
         if isinstance(parsed, list):
-            return np.array(parsed)
+            return np.array(parsed, dtype=float)
         else:
             return np.array([])
     except (ValueError, SyntaxError, TypeError):
@@ -295,7 +302,7 @@ def bootstrap_iteration(args):
     # Check for NaN values and issue a warning if found
     if boot_df["mean"].isna().any():
         warnings.warn("NaN values detected in the 'mean' column after bootstrap sampling. Returning NaN.")
-        return np.nan
+        return {}
 
     return aggregate_once(boot_df, method)
 

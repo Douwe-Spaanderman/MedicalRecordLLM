@@ -605,7 +605,7 @@ class ExperimentRunner:
             "-o", str(output_file),
             "-m"
         ] + methods
-        if self.concurrent:
+        if self.concurrent and not self.measurement_run: # Don't also run concurrent jobs for self.measurements run because already doing concurrent experiments
             command += ["-j", str(self.concurrent)]
         if include_LLM:
             command += ["--include-LLM"]
@@ -807,6 +807,7 @@ if __name__ == "__main__":
         runner.run()
 
     if not args.only_visualize:
+        runner.concurrent = args.max_concurrent
         runner.run_ranking()
 
     runner.run_visualization()
