@@ -79,7 +79,7 @@ def ranked_pairs_aggregation(votes, desc=None):
     ranking = list(nx.topological_sort(G))
     return ranking
 
-def kemeny_young_aggregation(votes, max_iter=10000, initial_temp=1000, cooling_rate=0.99):
+def kemeny_young_aggregation(votes, max_iter=1000, initial_temp=10000, cooling_rate=0.95):
     """
     Kemeny-Young aggregation: brute-force for small N, simulated annealing for large N.
     Stops early if the optimal solution (score = 0) is found.
@@ -93,7 +93,7 @@ def kemeny_young_aggregation(votes, max_iter=10000, initial_temp=1000, cooling_r
         all_perms = list(itertools.permutations(items))
         best_score = float("inf")
         best_perm = None
-        for perm in tqdm(all_perms, desc="Brute-force search"):
+        for perm in all_perms:
             score = 0
             for vote in votes:
                 for i in range(len(perm)):
@@ -112,24 +112,26 @@ def kemeny_young_aggregation(votes, max_iter=10000, initial_temp=1000, cooling_r
         current_score = compute_kemeny_young_score(current_perm, votes)
 
         temp = initial_temp
-        for iteration in tqdm(range(max_iter), desc="Simulated annealing"):
-            # Generate a neighbor
-            i, j = random.sample(range(n), 2)
+        for _ in range(max_iter):
+            # Generate neighbor by reversing a random segment
+            i, j = sorted(random.sample(range(n), 2))  # Ensure i <= j
             new_perm = current_perm.copy()
-            new_perm[i], new_perm[j] = new_perm[j], new_perm[i]
+            new_perm[i:j+1] = reversed(new_perm[i:j+1])  # Reverse the segment between i and j
+
             new_score = compute_kemeny_young_score(new_perm, votes)
 
-            # Check if the new solution is optimal
+            # Early exit if optimal solution is found
             if new_score == 0:
                 return new_perm
 
-            # Calculate the change in score
+            # Calculate change in score
             delta = new_score - current_score
 
             # Accept the new solution if it's better or with a probability if it's worse
             if delta < 0 or random.random() < math.exp(-delta / temp):
                 current_perm, current_score = new_perm, new_score
-                # Check if the current solution is optimal
+
+                # Early exit if optimal solution is found
                 if current_score == 0:
                     return current_perm
 
@@ -142,10 +144,11 @@ def compute_kemeny_young_score(perm, votes):
     """Compute the Kemeny-Young score for a given permutation."""
     score = 0
     for vote in votes:
+        vote_rank = {item: idx for idx, item in enumerate(vote)}
         for i in range(len(perm)):
             for j in range(i+1, len(perm)):
                 a, b = perm[i], perm[j]
-                if vote.index(a) > vote.index(b):
+                if vote_rank[a] > vote_rank[b]:
                     score += 1
     return score
 
