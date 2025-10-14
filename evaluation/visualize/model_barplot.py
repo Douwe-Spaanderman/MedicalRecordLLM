@@ -2,27 +2,10 @@ import matplotlib.pyplot as plt
 import matplotlib.axes
 import seaborn as sns
 import pandas as pd
-from typing import Dict, Optional, Tuple, Union, List
+from typing import Dict, Optional, Union, List
 import textwrap
+from metadata import *
 
-# --- Custom Style Parameters ---
-palette = ['#66c2a5','#fc8d62','#8da0cb', '#e78ac3']
-linewidth = 1
-fontsize = 18
-subfontsize = 16
-tickfontsize = 14
-edgecolor = "black"
-errorbar_color = "black"
-style = "ticks"
-barwidth = 0.8
-
-custom_params = {
-    "axes.spines.right": False,
-    "axes.spines.top": False,
-    "axes.edgecolor": edgecolor,
-    "patch.linewidth": linewidth,
-    "patch.edgecolor": edgecolor,
-}
 sns.set_theme(style=style, rc=custom_params, palette=sns.color_palette(palette))
 
 def add_ranks(ranked_results: pd.DataFrame, rank_method: str, data_labels: List[str]) -> List[str]:
@@ -284,7 +267,7 @@ def plot_metric_summary(
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Visualize calculated performance results from LLM output against ground truth.")
+    parser = argparse.ArgumentParser(description="Visualize calculated performance results from a specific LLM output against ground truth.")
     parser.add_argument(
         "-i",
         "--input-files",

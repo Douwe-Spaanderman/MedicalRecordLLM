@@ -7,20 +7,29 @@ from collections import defaultdict
 from tqdm.auto import tqdm
 import math
 import numpy as np
+import random
 from scipy import stats
 from scipy.stats import wilcoxon
 from scipy.cluster import hierarchy
 from scipy.spatial.distance import squareform
 import ast
+import re
+import warnings
+from multiprocessing import Pool
 
 def safe_literal_eval(x):
     try:
-        # Handle empty values
-        if pd.isna(x) or x.strip() in ['[]', '', 'nan']:
+        if pd.isna(x) or str(x).strip() in ['[]', '', 'nan']:
             return np.array([])
         
-        # Parse as Python literal
-        parsed = ast.literal_eval(x)
+        # Ensure x is a string
+        s = str(x).strip()
+        
+        # Replace multiple spaces with commas (but not those after '[' or before ']')
+        s = re.sub(r'\s+', ',', s.strip('[]'))
+        s = f"[{s}]"
+        
+        parsed = ast.literal_eval(s)
         if isinstance(parsed, list):
             return np.array(parsed)
         else:
@@ -63,34 +72,75 @@ def ranked_pairs_aggregation(votes, desc=None):
     ranking = list(nx.topological_sort(G))
     return ranking
 
-def kemeny_young_aggregation(votes):
+def kemeny_young_aggregation(votes, max_iter=10000, initial_temp=1000, cooling_rate=0.99):
     """
-    Kemeny-Young aggregation: brute-force version for small N.
+    Kemeny-Young aggregation: brute-force for small N, simulated annealing for large N.
+    Stops early if the optimal solution (score = 0) is found.
     """
-    items = set(itertools.chain(*votes))
+    items = sorted(set(itertools.chain(*votes)))
+    n = len(items)
+    n_perm_zeros = math.log10(math.factorial(n))
 
-    n_perm_zeros = math.log10(math.factorial(len(items)))
-    if n_perm_zeros > 9:
-        import ipdb; ipdb.set_trace()
-        raise ValueError(f"Too many votes: {len(items)}. Would result in > 1e{n_perm_zeros:d} permutations. Use a different method.")
-    
-    all_perms = list(itertools.permutations(items))
-    best_score = float("inf")
-    best_perm = None
+    if n_perm_zeros <= 9:
+        # Use brute-force for small N
+        all_perms = list(itertools.permutations(items))
+        best_score = float("inf")
+        best_perm = None
+        for perm in tqdm(all_perms, desc="Brute-force search"):
+            score = 0
+            for vote in votes:
+                for i in range(len(perm)):
+                    for j in range(i+1, len(perm)):
+                        a, b = perm[i], perm[j]
+                        if vote.index(a) > vote.index(b):
+                            score += 1
+            if score < best_score:
+                best_score = score
+                best_perm = perm
+        return list(best_perm)
+    else:
+        # Use simulated annealing for large N
+        current_perm = items.copy()
+        random.shuffle(current_perm)
+        current_score = compute_kemeny_young_score(current_perm, votes)
 
-    for perm in tqdm(all_perms):
-        score = 0
-        for vote in votes:
-            for i in range(len(perm)):
-                for j in range(i+1, len(perm)):
-                    a, b = perm[i], perm[j]
-                    if vote.index(a) > vote.index(b):
-                        score += 1
-        if score < best_score:
-            best_score = score
-            best_perm = perm
+        temp = initial_temp
+        for iteration in tqdm(range(max_iter), desc="Simulated annealing"):
+            # Generate a neighbor
+            i, j = random.sample(range(n), 2)
+            new_perm = current_perm.copy()
+            new_perm[i], new_perm[j] = new_perm[j], new_perm[i]
+            new_score = compute_kemeny_young_score(new_perm, votes)
 
-    return list(best_perm)
+            # Check if the new solution is optimal
+            if new_score == 0:
+                return new_perm
+
+            # Calculate the change in score
+            delta = new_score - current_score
+
+            # Accept the new solution if it's better or with a probability if it's worse
+            if delta < 0 or random.random() < math.exp(-delta / temp):
+                current_perm, current_score = new_perm, new_score
+                # Check if the current solution is optimal
+                if current_score == 0:
+                    return current_perm
+
+            # Cool down
+            temp *= cooling_rate
+
+        return current_perm
+
+def compute_kemeny_young_score(perm, votes):
+    """Compute the Kemeny-Young score for a given permutation."""
+    score = 0
+    for vote in votes:
+        for i in range(len(perm)):
+            for j in range(i+1, len(perm)):
+                a, b = perm[i], perm[j]
+                if vote.index(a) > vote.index(b):
+                    score += 1
+    return score
 
 def wilcoxon_stouffer_ranking(results_df, metric="mean", alpha=0.05):
     """
@@ -236,7 +286,44 @@ def wilcoxon_stouffer_ranking(results_df, metric="mean", alpha=0.05):
         'p_value_matrix': p_value_matrix
     }
 
-def rank(LLM_outputs:List[Path], output_file:bool = None, methods: List[str] = ["kemeny"], metric:str = "mean", include_LLM: bool = False):
+def bootstrap_iteration(args):
+    b, boot_df, method = args
+    boot_df["mean"] = boot_df["all_scores"].apply(
+        lambda x: x[b] if isinstance(x, np.ndarray) and len(x) > b else np.nan
+    )
+
+    # Check for NaN values and issue a warning if found
+    if boot_df["mean"].isna().any():
+        warnings.warn("NaN values detected in the 'mean' column after bootstrap sampling. Returning NaN.")
+        return np.nan
+
+    return aggregate_once(boot_df, method)
+
+def aggregate_once(df, method):
+    if method == "borda":
+        df["rank"] = df.groupby("field")["mean"].rank(ascending=False, method="min").astype(int)
+        mean_ranks = df.groupby("source")["rank"].mean().rank().astype(int)
+        return mean_ranks.to_dict()
+    elif method == "kemeny":
+        votes = []
+        for field, field_results in df.groupby("field"):
+            vote = list(field_results.sort_values("mean", ascending=False)["source"])
+            votes.append(vote)
+        final_order = kemeny_young_aggregation(votes)
+        return {src: i + 1 for i, src in enumerate(final_order)}
+    elif method == "ranked_pairs":
+        votes = []
+        for field, field_results in df.groupby("field"):
+            vote = list(field_results.sort_values("mean", ascending=False)["source"])
+            votes.append(vote)
+        final_order = ranked_pairs_aggregation(votes, desc="Ranked Pairs")
+        return {src: i + 1 for i, src in enumerate(final_order)}
+    elif method == "wilcoxon_stouffer":
+        return {}
+    else:
+        raise ValueError(f"Unknown aggregation method: {method}")
+
+def rank(LLM_outputs:List[Path], output_file:bool = None, methods: List[str] = ["kemeny"], n_jobs: int = 1, include_LLM: bool = False):
     """
     Rank aggregation of multiple LLM performance files.
     
@@ -245,8 +332,7 @@ def rank(LLM_outputs:List[Path], output_file:bool = None, methods: List[str] = [
         output_file (str, optional): Path to save the aggregated results. Defaults to None.
         methods (list[str], optional): List of methods for rank aggregation.
             Options are "borda", "kemeny", "ranked_pairs", "wilcoxon_stouffer".
-        metric (str, optional): Metric to use for ranking. Defaults to "mean".
-            Options are "mean", "precision", "recall", "f1", etc.
+        n_jobs (int): Number of concurrent jobs for bootstrap analysis
         include_LLM (bool): Bool whether to only look at prompting strategy or also LLM.
     """
     # Load all LLM outputs into a DataFrame
@@ -272,44 +358,42 @@ def rank(LLM_outputs:List[Path], output_file:bool = None, methods: List[str] = [
     results = pd.concat(results, ignore_index=True)
 
     # Prepare rank DataFrame: index = source, columns = methods
-    rank_df = pd.DataFrame(index=results["source"].unique())
+    sources = results["source"].unique()
+    rank_df = pd.DataFrame(index=sources)
 
     for method in methods:
-        if method == "borda":
-            # Average Borda score across all fields
-            results['rank'] = results.groupby("field")[metric].rank(
-                ascending=False, method='min'
-            ).astype(int)
-            mean_ranks = results.groupby("source")["rank"].mean().rank().astype(int)
-            rank_df[method] = mean_ranks
+        mean_df = results.copy()
+        rank_map = aggregate_once(mean_df, method)
+        rank_df[method] = pd.Series(rank_map)
+        n_boot = min(min(len(x) for x in results["all_scores"] if isinstance(x, np.ndarray) and len(x) > 0), 100)
+        if n_boot == 0:
+            continue
+        rank_samples = {src: [] for src in rank_df.index}
+        boot_df = results.copy()
+        args = [(b, boot_df, method) for b in range(n_boot)]
+        with Pool(n_jobs) as pool:
+            boot_rank_maps = list(tqdm(pool.imap(bootstrap_iteration, args), total=n_boot, desc=f"Bootstrapping {method}"))
 
-        elif method == "kemeny":
-            # Build votes = list of rankings per field
-            votes = []
-            for field, field_results in results.groupby("field"):
-                vote = list(field_results.sort_values(metric, ascending=False)["source"])
-                votes.append(vote)
-            final_order = kemeny_young_aggregation(votes)
-            rank_map = {src: i+1 for i, src in enumerate(final_order)}
-            rank_df[method] = pd.Series(rank_map)
+        for boot_rank_map in boot_rank_maps:
+            for src, r in boot_rank_map.items():
+                rank_samples[src].append(r)
 
-        elif method == "ranked_pairs":
-            votes = []
-            for field, field_results in results.groupby("field"):
-                vote = list(field_results.sort_values(metric, ascending=False)["source"])
-                votes.append(vote)
-            final_order = ranked_pairs_aggregation(votes, desc="Ranked Pairs")
-            rank_map = {src: i+1 for i, src in enumerate(final_order)}
-            rank_df[method] = pd.Series(rank_map)
+        ci_low = {}
+        ci_high = {}
+        for src, ranks in rank_samples.items():
+            if ranks:
+                ci_low[src] = np.percentile(ranks, 2.5)
+                ci_high[src] = np.percentile(ranks, 97.5)
+            else:
+                ci_low[src] = np.nan
+                ci_high[src] = np.nan
 
-        elif method == "wilcoxon_stouffer":
-            # TODO: fix this, please don't use at this moment
-            pass
-            #ranking_result = wilcoxon_stouffer_ranking(results, metric="all_scores")
-            #rank_df[method] = pd.Series(ranking_result['ranks'])
-        else:
-            raise ValueError(f"Unknown aggregation method: {method}")
-            
+        if include_LLM:
+            import ipdb; ipdb.set_trace()
+
+        rank_df[f"{method}_ci_low"] = pd.Series(ci_low)
+        rank_df[f"{method}_ci_high"] = pd.Series(ci_high)
+
     rank_df = rank_df.reset_index().rename(columns={"index": "source"})
 
     if output_file:
@@ -342,16 +426,22 @@ if __name__ == "__main__":
         "--method",
         type=str,
         nargs='+',
-        default=["borda", "kemeny", "ranked_pairs", "wilcoxon_stouffer"],
+        default=["borda", "kemeny", "ranked_pairs"],
         choices=["borda", "kemeny", "ranked_pairs", "wilcoxon_stouffer"],
         help="Method for rank aggregation."
     )
     parser.add_argument(
-        "--metric",
-        type=str,
-        default="mean",
-        help="Primary metric for rank aggregation."
+        "-j",
+        "--n-jobs",
+        type=int,
+        default=1,
+        help="Number of concurrent jobs for bootstrapping."
+    )
+    parser.add_argument(
+        "--include-LLM", 
+        action="store_true", 
+        help="Do you want to include the name of the LLM in the source column?"
     )
 
     args = parser.parse_args()
-    rank(args.input_files, args.output_file, args.method, args.metric)
+    rank(args.input_files, args.output_file, args.method, args.n_jobs, args.include_LLM)

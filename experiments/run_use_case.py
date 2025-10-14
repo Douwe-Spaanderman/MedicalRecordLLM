@@ -1,7 +1,5 @@
 import subprocess
 import argparse
-import json
-import os
 import shlex
 import yaml
 import logging
@@ -45,6 +43,7 @@ class ExperimentRunner:
         balanced_accuracy: bool = False,
         strict_metrics: bool = False,
         measurement_run: bool = False,
+        summarize: bool = False,
         python_cmd: str = "python",
         dry_run: bool = False,
     ):
@@ -68,13 +67,14 @@ class ExperimentRunner:
         self.balanced_accuracy = balanced_accuracy
         self.strict_metrics = strict_metrics
         self.measurement_run = measurement_run
+        self.summarize = summarize
         self.python_cmd = python_cmd
         self.dry_run = dry_run
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.performance_files = defaultdict(list)
         self.ranked_results = {}
-        self.concurrent = False if self.measurement_run else False # Hardcoded for now, TODO: make configurable
+        self.concurrent = self.default_max_concurrent if self.measurement_run else False # Bit awkward that default_max_concurrent manages two very different settings
         self.logger = logging.getLogger(__name__)
         if self.dry_run:
             self.logger.info(f"[Dry Run] activated, no prompting or calculations will be done")
@@ -156,7 +156,7 @@ class ExperimentRunner:
         2. Run experiments for each prompt method and model configuration.
         3. Calculate performance metrics for each experiment.
         """
-        if self.concurrent:
+        if self.concurrent and self.concurrent > 1:
             all_combinations = list(product(self.model_configs, self.prompt_methods))
 
             # Parallel execution
@@ -394,7 +394,7 @@ class ExperimentRunner:
             "-l", str(llm_output_path),
             "-p", str(self.prompt_config_path),
             "-o", str(perf_output_path),
-            "--bootstrap", "5",
+            "--bootstrap", "1000",
         ]
         if self.balanced_accuracy:
             command.extend([
@@ -453,7 +453,14 @@ class ExperimentRunner:
             out_file = self.output_dir / model_name / f"all_results.png"
             ranked_file = self.ranked_results.get(model_name, None)
 
-            self.visualize(files, out_file, labels, ranked_file)
+            #self.visualize(files, out_file, labels, ranked_file) #TODO uncommnet
+
+        if self.summarize:
+            self.logger.info("[Ranking] Starting visualization across all models and prompting strategies")
+            files = [path for models in self.performance_files.values() for _, path in models]
+            ranked_file = self.ranked_results.get("all", None)
+
+            self.visualize_use_case(files, ranked_file)
 
     def visualize(self, input_files: List[str], output_file: Path, labels: List[str], ranked_file: Optional[str] = None):
         """
@@ -465,7 +472,7 @@ class ExperimentRunner:
             labels (List[str]): Optional labels for each input file.
         """
         command = [
-            self.python_cmd, str(project_root / "evaluation" / "visualize_performance.py"),
+            self.python_cmd, str(project_root / "evaluation" / "visualize" / "model_barplot.py"),
             "-i"
         ] + input_files + [
             "-o", str(output_file),
@@ -484,6 +491,63 @@ class ExperimentRunner:
             self.logger.info(f"[Visualize] {output_file}")
         except subprocess.CalledProcessError as e:
             self.logger.error(f"[Error] Failed to visualize performance results for {output_file}")
+            self.logger.error(e)
+        except Exception as e:
+            self.logger.error(f"[Unexpected Error] {str(e)}")
+
+    def visualize_use_case(self, input_files: List[str], ranked_file: Optional[str] = None):
+        """
+        Visualize performance results from LLM output files.
+
+        Args:
+            input_files (List[str]): List of paths to the LLM output files.
+            ranked_file (Optional[str]): Optional ranked file
+        """
+        # Barplot
+        output_file = str(self.output_dir / "performance.png")
+        command = [
+            self.python_cmd, str(project_root / "evaluation" / "visualize" / "general_barplot.py"),
+            "-i"
+        ] + input_files + [
+            "-o", output_file,
+            "--use-case"
+        ]
+
+        if self.dry_run:
+            self.logger.info("[Dry Run] Would visualize barplot for use case with commands: " + " ".join(command))
+            return
+
+        try:
+            self.log_command(command)
+            subprocess.run(command, check=True)
+            self.logger.info(f"[Visualize] {output_file}")
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"[Error] Failed to visualize barplot for use case for {output_file}")
+            self.logger.error(e)
+        except Exception as e:
+            self.logger.error(f"[Unexpected Error] {str(e)}")
+
+        # Heatmap
+        output_file = str(self.output_dir / "heatmap.png")
+        command = [
+            self.python_cmd, str(project_root / "evaluation" / "visualize" / "heatmap.py"),
+            "-i"
+        ] + input_files + [
+            "-o", str(output_file)
+        ]
+        if ranked_file:
+            command += ["-r", str(ranked_file)]
+
+        if self.dry_run:
+            self.logger.info("[Dry Run] Would visualize heatmap for use case with commands: " + " ".join(command))
+            return
+
+        try:
+            self.log_command(command)
+            subprocess.run(command, check=True)
+            self.logger.info(f"[Visualize] {output_file}")
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"[Error] Failed to visualize heatmap for use case for {output_file}")
             self.logger.error(e)
         except Exception as e:
             self.logger.error(f"[Unexpected Error] {str(e)}")
@@ -513,18 +577,26 @@ class ExperimentRunner:
             out_file = self.output_dir / model_name / "ranked_results.csv"
             self.rank(files, model_name, out_file)
 
+        # A general for each 
+        if self.summarize:
+            self.logger.info("[Ranking] Starting rank aggregation across all models and prompting strategies")
+            files = [path for models in self.performance_files.values() for _, path in models]
+            out_file = self.output_dir / "ranked_results.csv"
+            self.rank(files, model_name=None, output_file=out_file, include_LLM=True)
+
         self.logger.info("[Ranking] Rank aggregation completed.")
 
-    def rank(self, input_files: List[str], model_name: str, output_file: Optional[Path] = None, methods: List[str] = ["borda", "kemeny", "ranked_pairs", "wilcoxon_stouffer"]):
+    def rank(self, input_files: List[str], model_name: Optional[str] = None, output_file: Optional[Path] = None, methods: List[str] = ["kemeny"], include_LLM: bool = False):
         """
         Rank aggregation of multiple LLM performance files.
 
         Args:
             input_files (List[str]): List of paths to the LLM performance files.
-            model_name (str): name of model
+            model_name (Optional[str]): name of model
             output_file (Optional[Path]): Path to save the aggregated results. Defaults to None.
             methods (list[str], optional): List of methods for rank aggregation.
                 Options are "borda", "kemeny", "ranked_pairs", "wilcoxon_stouffer".
+            include_LLM (bool): If you want to include the name of the LLM in the source column.
         """
         command = [
             self.python_cmd, str(project_root / "evaluation" / "rank_aggregation.py"),
@@ -533,6 +605,10 @@ class ExperimentRunner:
             "-o", str(output_file),
             "-m"
         ] + methods
+        if self.concurrent:
+            command += ["-j", str(self.concurrent)]
+        if include_LLM:
+            command += ["--include-LLM"]
 
         if self.dry_run:
             self.logger.info("[Dry Run] Would run rank aggregation with command: " + " ".join(command))
@@ -542,7 +618,10 @@ class ExperimentRunner:
             self.log_command(command)
             subprocess.run(command, check=True)
             self.logger.info(f"[Ranking] Results saved to {output_file}")
-            self.ranked_results[model_name] = str(output_file)
+            if model_name:
+                self.ranked_results[model_name] = str(output_file)
+            else:
+                self.ranked_results["all"] = str(output_file)
         except subprocess.CalledProcessError as e:
             self.logger.error(f"[Error] Failed to run rank aggregation for {input_files}")
             self.logger.error(e)
@@ -570,6 +649,10 @@ class ExperimentRunner:
             m = re.match(fr"{base_path}/(.*)/ranked_results.csv", path)
             model_name = m.group(1)  
             self.ranked_results[model_name] = str(path)
+
+        all_path = Path(base_path / "ranked_results.csv")
+        if all_path.exists():
+            self.ranked_results["all"] = str(all_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run all LLM experiments.")
@@ -680,6 +763,9 @@ if __name__ == "__main__":
         "--measurement-run", action="store_true", help="Perform only measurement without prompting llm."
     )
     parser.add_argument(
+        "--summarize", action="store_true", help="Summarize performance across all models and prompting strategies."
+    )
+    parser.add_argument(
         "--python-cmd", type=str, default="python", help="Command for python binary."
     )
     parser.add_argument(
@@ -713,6 +799,7 @@ if __name__ == "__main__":
         balanced_accuracy=args.with_balanced_accuracy,
         strict_metrics=args.strict_metrics,
         measurement_run=args.measurement_run,
+        summarize=args.summarize,
         python_cmd=args.python_cmd,
         dry_run=args.dry_run,
     )

@@ -524,7 +524,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--bootstrap",
         type=int,
-        default=1,
+        default=1000,
         help="Number of n_bootstrap, if <= 1 than bootstrapping is not used.",
     )
     parser.add_argument(
