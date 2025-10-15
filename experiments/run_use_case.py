@@ -454,14 +454,17 @@ class ExperimentRunner:
             out_file = self.output_dir / model_name / f"all_results.png"
             ranked_file = self.ranked_results.get(model_name, None)
 
-            #self.visualize(files, out_file, labels, ranked_file) #TODO uncommnet
+            self.visualize(files, out_file, labels, ranked_file)
 
         if self.summarize:
             self.logger.info("[Ranking] Starting visualization across all models and prompting strategies")
             files = [path for models in self.performance_files.values() for _, path in models]
             ranked_file = self.ranked_results.get("all", None)
+            inter_rater_agreement = self.data_path.parent / "raters" / "inter-rater-agreement.csv" # TODO shouldn't be hardcoded like this
+            if not inter_rater_agreement.exists():
+                inter_rater_agreement = None
 
-            self.visualize_use_case(files, ranked_file)
+            self.visualize_use_case(files, ranked_file, inter_rater_agreement)
 
     def visualize(self, input_files: List[str], output_file: Path, labels: List[str], ranked_file: Optional[str] = None):
         """
@@ -496,7 +499,7 @@ class ExperimentRunner:
         except Exception as e:
             self.logger.error(f"[Unexpected Error] {str(e)}")
 
-    def visualize_use_case(self, input_files: List[str], ranked_file: Optional[str] = None):
+    def visualize_use_case(self, input_files: List[str], ranked_file: Optional[str] = None, inter_rater_agreement: Optional[str] = None):
         """
         Visualize performance results from LLM output files.
 
@@ -529,7 +532,7 @@ class ExperimentRunner:
             self.logger.error(f"[Unexpected Error] {str(e)}")
 
         # Heatmap
-        output_file = str(self.output_dir / "heatmap.png")
+        output_file = str(self.output_dir / "heatmap.pdf")
         command = [
             self.python_cmd, str(project_root / "evaluation" / "visualize" / "heatmap.py"),
             "-i"
@@ -538,6 +541,9 @@ class ExperimentRunner:
         ]
         if ranked_file:
             command += ["-r", str(ranked_file)]
+
+        if inter_rater_agreement:
+            command += ["-in", str(inter_rater_agreement)]
 
         if self.dry_run:
             self.logger.info("[Dry Run] Would visualize heatmap for use case with commands: " + " ".join(command))

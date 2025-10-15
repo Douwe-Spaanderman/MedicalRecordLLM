@@ -258,13 +258,14 @@ def calculate_agreement(raters: List[pd.DataFrame], prompt_config: Dict[str, Any
 
         if type_value in {"binary", "categorical", "boolean", "ordinal"}:
             metric = "balanced_accuracy"
-        elif type_value in {"number", "float"}:
+        elif type_value in {"number", "float", "string_exact_match"}:
             metric = "accuracy"
         elif type_value == "string":
             metric = "semantic_similarity"
         elif type_value == "list":
             metric = "list_similarity"
         else:
+            warnings.warn(f"Skipping metric: {field} as type: {type_value} not in one of the options.")
             continue
 
         res = bootstrap_pairwise_metric(df_field, metric, sentence_model, n_bootstrap)

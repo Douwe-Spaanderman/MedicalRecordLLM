@@ -16,6 +16,7 @@ import pandas as pd
 def read_performances_and_rank(
     input_files: List[Union[str, os.PathLike]],
     rank_files: Optional[List[Union[str, os.PathLike]]] = None,
+    inter_rater_agreement: Optional[Union[str, os.PathLike]] = None,
     rank_method: str = "kemeny"
 ) -> pd.DataFrame:
     """
@@ -26,7 +27,9 @@ def read_performances_and_rank(
     input_files : List[Union[str, os.PathLike]]
         List of performance data files.
     rank_files : Optional[List[Union[str, os.PathLike]]]
-        List of rank files. If None, only performance data is processed.
+        List of rank files. If None, no rank will be added.
+    inter_rater_agreement: Optional[Union[str, os.PathLike]]
+        Path to inter-rater agreement file. If None, no inter-rater agreement will be added.
     rank_method : str, default="kemeny"
         Method used for ranking.
 
@@ -104,6 +107,7 @@ def read_performances_and_rank(
                     f"{rank_method}_ci_low": "Use Case Rank CI Low",
                     f"{rank_method}_ci_high": "Use Case Rank CI High",
                 })
+                rank = rank[["Use_Case", "LLM", "Prompting Strategy", "Use Case Rank", "Use Case Rank CI Low", "Use Case Rank CI High"]]
                 use_case_rank = rank.copy()
             else:
                 rank["Use_Case"] = rank_file.parents[2].name.replace("Use_Case_", "")
@@ -114,6 +118,8 @@ def read_performances_and_rank(
                     f"{rank_method}_ci_low": "Prompt Rank CI Low",
                     f"{rank_method}_ci_high": "Prompt Rank CI High",
                 })
+                rank = rank[["Use_Case", "LLM", "Prompting Strategy", "Prompt Rank", "Prompt Rank CI Low", "Prompt Rank CI High"]]
+                rank = rank.drop(columns=[f"{rank_method}_raw_ranks"])
                 prompt_ranks.append(rank)
 
         # Merge rank data
@@ -130,5 +136,21 @@ def read_performances_and_rank(
                 how="left",
                 on=["Use_Case", "LLM", "Prompting Strategy"]
             )
+
+    # --- Process inter-rater agreement if provided ---
+    if inter_rater_agreement:
+        inter_rater_agreement = Path(inter_rater_agreement)
+        inter_rater_agreement = pd.read_csv(inter_rater_agreement)
+        inter_rater_agreement = inter_rater_agreement[["field", "field_type", "metric_type", "mean", "ci_low", "ci_high"]]
+        inter_rater_agreement = inter_rater_agreement.rename(columns={
+            "mean": "Inter-Rater Agreement Mean",
+            "ci_low": "Inter-Rater Agreement CI Low",
+            "ci_high": "Inter-Rater Agreement CI High",
+        })
+        data = data.merge(
+            inter_rater_agreement,
+            how="left",
+            on=["field", "field_type", "metric_type"]
+        )
 
     return data

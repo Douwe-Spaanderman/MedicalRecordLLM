@@ -73,37 +73,72 @@ def create_heatmap(plot_data, ax=None, figsize=None):
         )
     )
 
-    rank_df = plot_data.pivot(
-        index=["LLM Name", "Prompting Strategy Name"],
-        columns="field",
-        values="Use Case Rank"
-    )
-    if isinstance(rank_df, pd.DataFrame):
-        rank_df = rank_df.iloc[:, 0]
+    adding_rank = False
+    if "Use Case Rank" in plot_data.columns:
+        adding_rank = True
+        ranks = {
+            "Use Case Rank": "Rank",
+            "Use Case Rank CI Low": "Rank CI Low",
+            "Use Case Rank CI High": "Rank CI High"
+        }
+        rank_df = {
+            new_col: plot_data.pivot(
+                index=["LLM Name", "Prompting Strategy Name"],
+                columns="field",
+                values=old_col
+            ).iloc[:, 0].reindex(heatmap_df.index)
+            for old_col, new_col in ranks.items()
+        }
 
-    rank_df = rank_df.reindex(heatmap_df.index)
-    cols = list(heatmap_df.columns)
-    cols.append(" ")  # add spacer at the end
-    heatmap_df = heatmap_df.reindex(columns=cols)
-    heatmap_df[" "] = np.nan
-    heatmap_df["Rank"] = rank_df
+        cols = list(heatmap_df.columns)
+        cols.append(" ")  # add spacer at the end
+        heatmap_df = heatmap_df.reindex(columns=cols)
+        heatmap_df[" "] = np.nan
+        for col in rank_df:
+            heatmap_df[col] =  rank_df[col]
 
+    # Add intra-rater annotations
+    adding_agreement = False
+    if "Inter-Rater Agreement Mean" in plot_data:
+        adding_agreement = True
+        rater = plot_data[["field", "Inter-Rater Agreement Mean", "Inter-Rater Agreement CI Low", "Inter-Rater Agreement CI High"]]
+        rater = rater.drop_duplicates()
+        rater = rater.drop_duplicates().set_index("field")
+        inter_rater_index = pd.MultiIndex.from_tuples([("Inter-Rater Agreement", "Mean"), ("Inter-Rater Agreement", "CI Low"), ("Inter-Rater Agreement", "CI High")], names=["LLM Name", "Prompting Strategy Name"])
+        inter_rater_row = pd.DataFrame(
+            index=inter_rater_index,
+            columns=heatmap_df.columns
+        )
+        for field in rater.index:
+            if field in heatmap_df.columns:
+                inter_rater_row.loc[("Inter-Rater Agreement", "Mean"), field] = rater.loc[field, "Inter-Rater Agreement Mean"]
+                inter_rater_row.loc[("Inter-Rater Agreement", "CI Low"), field] = rater.loc[field, "Inter-Rater Agreement CI Low"]
+                inter_rater_row.loc[("Inter-Rater Agreement", "CI High"), field] = rater.loc[field, "Inter-Rater Agreement CI High"]
+
+        # Create an empty row with NaN values
+        empty_index = pd.MultiIndex.from_tuples([(" ", " ")], names=["LLM Name", "Prompting Strategy Name"])
+        empty_row = pd.DataFrame(
+            index=empty_index,
+            columns=heatmap_df.columns
+        )
+        empty_row.loc[(" ", " ")] = np.nan
+
+        heatmap_df = pd.concat([inter_rater_row, empty_row, heatmap_df])
+
+    heatmap_df = heatmap_df.astype(float)
     annot_df = heatmap_df.copy()
     annot_df = annot_df.applymap(lambda x: float(f"{x:.2f}") if pd.notnull(x) else "") # two decimal
 
-    heatmap_df["Rank"] = 1 - (heatmap_df["Rank"] - heatmap_df["Rank"].min()) / (heatmap_df["Rank"].max() - heatmap_df["Rank"].min())
+    if adding_rank:
+        rank_min = heatmap_df["Rank"].min()
+        rank_max = heatmap_df["Rank"].max()
+        for col in ["Rank", "Rank CI Low", "Rank CI High"]:
+            heatmap_df[col] = 1 - (heatmap_df[col] - rank_min) / (rank_max - rank_min)
 
     mask = heatmap_df.isna()  # True for NaNs
-    # or specifically mask the " " column
-    mask = heatmap_df.columns.to_series().eq(" ")  # returns a boolean Series for columns
-    mask = pd.DataFrame(np.repeat(mask.values[np.newaxis, :], heatmap_df.shape[0], axis=0),
-                        index=heatmap_df.index, columns=heatmap_df.columns)
-
     n_rows = len(heatmap_df)
     n_cols = heatmap_df.shape[1]
     n_strats = heatmap_df.index.get_level_values(1).nunique()
-    llm_index_order = heatmap_df.index.get_level_values(0).unique()
-
     if figsize is None:
         fixed_cols = {"Instructions", " ", "Rank"}
         metric_cols = [c for c in heatmap_df.columns if c not in fixed_cols]
@@ -119,53 +154,119 @@ def create_heatmap(plot_data, ax=None, figsize=None):
         n_rows = len(heatmap_df)
         fig_height = max(8, n_rows * 0.6)  # minimum height 8 inches
     
-    def _decorate_axis(ax, sub_df):
-        # set ytick labels to only the strategy part (in the sub_df order)
+    def _decorate_axis(ax, sub_df, mask):
+        """
+        Decorate heatmap axis with dynamic gridlines based on mask:
+        - Thin lines (0.5) between False cells
+        - Thick borders (3) around False edges or True cell borders
+        - No lines between adjacent True cells
+        - No border for True cells at the edge
+        - LLM separator lines skip rows containing True in mask
+        """
         ytick_locs = np.arange(len(sub_df)) + 0.5
         strategies = [str(s) for s in sub_df.index.get_level_values(1)]
         ax.set_yticks(ytick_locs)
         ax.set_yticklabels(strategies, rotation=0, fontsize=tickfontsize)
 
-        # add LLM names centered next to their block (computed from sub_df)
         level0 = list(sub_df.index.get_level_values(0))
         unique_llms = pd.Index(level0).unique()
 
-        # Identify spacer columns (named " ")
-        spacer_cols = [i for i, c in enumerate(sub_df.columns) if str(c) == " "]
-        for i in range(len(sub_df.columns)+1):
-            # draw vertical line manually
-            ax.vlines(i, *ax.get_ylim(), colors="black", linewidth=0.5)
+        nrows, ncols = sub_df.shape
+        xgrid = np.arange(ncols + 1)
+        ygrid = np.arange(nrows + 1)
 
-        for row in range(len(sub_df.index)+1):
-            start_x = 0
-            for spacer in spacer_cols + [len(sub_df.columns)]:
-                ax.hlines(y=row, xmin=start_x, xmax=spacer, colors="black", linewidth=0.5)
-                start_x = spacer + 1
-                
+        # --- Draw cell borders based on mask ---
+        for r in range(nrows):
+            for c in range(ncols):
+                val = mask.iloc[r, c]
+
+                # Determine neighbor mask values
+                top_val = mask.iloc[r-1, c] if r > 0 else None
+                bottom_val = mask.iloc[r+1, c] if r < nrows - 1 else None
+                left_val = mask.iloc[r, c-1] if c > 0 else None
+                right_val = mask.iloc[r, c+1] if c < ncols - 1 else None
+
+                # --- True cells ---
+                if val:
+                    # Skip borders if neighbor is also True or outside mask
+                    if r > 0 and not top_val:
+                        ax.hlines(y=ygrid[r], xmin=c, xmax=c+1, colors="black", linewidth=2)
+                    if r < nrows - 1 and not bottom_val:
+                        ax.hlines(y=ygrid[r+1], xmin=c, xmax=c+1, colors="black", linewidth=2)
+                    if c > 0 and not left_val:
+                        ax.vlines(x=xgrid[c], ymin=r, ymax=r+1, colors="black", linewidth=2)
+                    if c < ncols - 1 and not right_val:
+                        ax.vlines(x=xgrid[c+1], ymin=r, ymax=r+1, colors="black", linewidth=2)
+
+                # --- False cells ---
+                else:
+                    # Horizontal lines
+                    # Top edge
+                    if r == 0:
+                        ax.hlines(y=ygrid[r], xmin=c, xmax=c+1, colors="black", linewidth=4)
+                    # Bottom edge
+                    elif r == nrows - 1:
+                        ax.hlines(y=ygrid[r+1], xmin=c, xmax=c+1, colors="black", linewidth=4)
+                    # Internal rows
+                    else:
+                        if mask.iloc[r+1, c]:
+                            pass  # next is True → skip thin line
+                        else:
+                            ax.hlines(y=ygrid[r+1], xmin=c, xmax=c+1, colors="black", linewidth=0.5)
+
+                    # Vertical lines
+                    # Left edge
+                    if c == 0:
+                        ax.vlines(x=xgrid[c], ymin=r, ymax=r+1, colors="black", linewidth=4)
+                    # Right edge
+                    elif c == ncols - 1:
+                        ax.vlines(x=xgrid[c+1], ymin=r, ymax=r+1, colors="black", linewidth=4)
+                    # Internal columns
+                    else:
+                        if mask.iloc[r, c+1]:
+                            pass  # next is True → skip thin line
+                        else:
+                            ax.vlines(x=xgrid[c+1], ymin=r, ymax=r+1, colors="black", linewidth=0.5)
+
+        # --- LLM group labels ---
         for llm in unique_llms:
             idxs = [i for i, x in enumerate(level0) if x == llm]
             start = idxs[0]
             end = idxs[-1]
 
+            # Compute the mid-point for LLM label
             llm_text = "\n".join(textwrap.wrap(str(llm), width=15))
-
             mid = ytick_locs[start:end+1].mean()
             ax.text(
                 -4, mid, llm_text,
                 ha="right", va="center", fontsize=tickfontsize, fontweight="bold"
             )
-            if not end+1 == ax.get_ylim()[0]:
-                ax.hlines(y=end + 1, xmin=0, xmax=spacer_cols[0], colors="black", linewidth=3)
-                ax.hlines(y=end + 1, xmin=spacer_cols[0] + 1, xmax=len(sub_df.columns)+1, colors="black", linewidth=3)
 
+            # Draw horizontal separator only if not last row
+            if not end + 1 == ax.get_ylim()[0]:
+                mask_row = mask.iloc[end, :]
+                in_segment = False
+                seg_start = 0
+                for c, val in enumerate(mask_row):
+                    if not val and not in_segment:
+                        # Start new segment
+                        seg_start = c
+                        in_segment = True
+                    elif val and in_segment:
+                        # End segment before True
+                        ax.hlines(y=ygrid[end+1], xmin=seg_start, xmax=c, colors="black", linewidth=2)
+                        in_segment = False
+                # Draw last segment if row ends with False
+                if in_segment:
+                    ax.hlines(y=ygrid[end+1], xmin=seg_start, xmax=len(mask_row), colors="black", linewidth=2)
+
+        # --- general cleanup ---
         ax.set_ylabel("")
         ax.set_xlabel("")
-
-        # wrap x-tick labels
         xticks = ["\n".join(textwrap.wrap(str(tick.get_text()), width=30)) for tick in ax.get_xticklabels()]
         ax.set_xticklabels(xticks, rotation=45, ha="right", fontsize=tickfontsize)
         ax.tick_params(axis="both", which="both", bottom=False, left=False)
-
+        
     # If ax is provided, use single plot
     if ax is not None:
         hm = sns.heatmap(
@@ -179,21 +280,31 @@ def create_heatmap(plot_data, ax=None, figsize=None):
             square=True,
             annot_kws={"size": tickfontsize}
         )
-        _decorate_axis(ax, heatmap_df)
+        _decorate_axis(ax, heatmap_df, mask)
         return hm
     if n_rows > 15:
+        if adding_agreement:
+            n_header_rows = 4
+        else:
+            n_header_rows = 0
+
+        llm_index_order = heatmap_df[n_header_rows:].index.get_level_values(0).unique()
         n_models = len(llm_index_order)
         half_models = math.ceil(n_models / 2)
+
         left_llms = llm_index_order[:half_models]
         right_llms = llm_index_order[half_models:]
-
         idx = pd.IndexSlice
-        heatmap_df1 = heatmap_df.loc[idx[left_llms, :], :]
-        annot_df1 = annot_df.loc[idx[left_llms, :], :]
-        mask1 = mask.loc[idx[left_llms, :], :]
-        heatmap_df2 = heatmap_df.loc[idx[right_llms, :], :]
-        annot_df2 = annot_df.loc[idx[right_llms, :], :]
-        mask2 = mask.loc[idx[right_llms, :], :]
+        left_idx = heatmap_df.index[:n_header_rows].append(heatmap_df.loc[idx[left_llms, :], :].index)
+        right_idx = heatmap_df.index[:n_header_rows].append(heatmap_df.loc[idx[right_llms, :], :].index)
+
+        heatmap_df1 = heatmap_df.loc[left_idx, :]
+        annot_df1 = annot_df.loc[left_idx, :]
+        mask1 = mask.loc[left_idx, :]
+
+        heatmap_df2 = heatmap_df.loc[right_idx, :]
+        annot_df2 = annot_df.loc[right_idx, :]
+        mask2 = mask.loc[right_idx, :]
 
         if figsize is None:
             n_models = len(heatmap_df.index.get_level_values(0).unique())
@@ -227,8 +338,8 @@ def create_heatmap(plot_data, ax=None, figsize=None):
             mask=mask2
         )
 
-        _decorate_axis(ax1, heatmap_df1)
-        _decorate_axis(ax2, heatmap_df2)
+        _decorate_axis(ax1, heatmap_df1, mask1)
+        _decorate_axis(ax2, heatmap_df2, mask2)
         
         return fig
 
@@ -246,7 +357,7 @@ def create_heatmap(plot_data, ax=None, figsize=None):
         annot_kws={"size": tickfontsize},
         mask=mask
     )
-    _decorate_axis(ax, heatmap_df)
+    _decorate_axis(ax, heatmap_df, mask)
     return fig
 
 if __name__ == "__main__":
@@ -272,11 +383,18 @@ if __name__ == "__main__":
         nargs='+',
         help="Path(s) to the CSV file with ranked results"
     )
+    parser.add_argument(
+        "-in",
+        "--inter-rater-agreement",
+        type=str,
+        default=None,
+        help="Path to the CSV file with inter-rater-agreement"
+    )
     args = parser.parse_args()
 
     from utils import read_performances_and_rank
-    data = read_performances_and_rank(args.input_files, args.ranked_results)
+    data = read_performances_and_rank(args.input_files, args.ranked_results, args.inter_rater_agreement)
     
     create_heatmap(data, figsize=figsizes.get(data["Use_Case"].iloc[0]))
-    plt.savefig(args.output_file, bbox_inches='tight', dpi=200)
+    plt.savefig(args.output_file, bbox_inches='tight', dpi=300)
     plt.close()
