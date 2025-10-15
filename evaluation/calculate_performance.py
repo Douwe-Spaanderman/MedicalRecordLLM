@@ -45,28 +45,41 @@ def read_prompt_config(prompt_config_path: str) -> Dict[str, Any]:
     prompt = {item["name"]: {key: value for key, value in item.items() if key != "name"} for item in prompt}
     return prompt
 
+# Global in-memory lookup for symmetric similarity cache
+_similarity_cache = {}
+
 def calculate_similarity(pred: str, gt: str, sentence_model: str) -> float:
     """
     Calculate semantic similarity between two strings using a sentence transformer model.
-
-    Args:
-        pred (str): The predicted string.
-        gt (str): The ground truth string.
-        sentence_model (str): The sentence transformer model to use.
-    Returns:
-        float: Similarity score between 0.0 and 1.0.
+    Uses a global cache to avoid recomputing repeated string pairs.
     """
-    sentence_model = load_sentence_model(sentence_model)
 
-    if pred == gt:
-        return 1.0 # Complete match
+    # Normalize input
+    pred = (pred or "").strip()
+    gt = (gt or "").strip()
+
+    # Handle trivial and missing cases
+    if pred == gt and pred != "":
+        return 1.0
     if not gt:
         return np.nan
-    if not pred or not gt:
+    if not pred:
         return 0.0
-    
-    embeddings = sentence_model.encode([pred, gt], convert_to_tensor=True)
+
+    # Create a symmetric cache key
+    key = tuple(sorted([pred, gt]))
+
+    # Return cached result if available
+    if key in _similarity_cache:
+        return _similarity_cache[key]
+
+    # Otherwise compute
+    model = load_sentence_model(sentence_model)
+    embeddings = model.encode([pred, gt], convert_to_tensor=True)
     similarity = util.cos_sim(embeddings[0], embeddings[1]).item()
+
+    # Cache and return
+    _similarity_cache[key] = similarity
     return similarity
 
 def calculate_list_similarity(pred_list: List[str], gt_list: List[str], sentence_model: str) -> float:
