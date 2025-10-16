@@ -59,7 +59,7 @@ model_sizes = {
 
 use_cases = {
     "CRLM": "Colorectal Liver Metastases (Dutch)",
-    "Liver": "Liver Tumors (Dutch)",
+    "Liver": "Liver Tumours (Dutch)",
     "Dementia": "Dementia (Dutch)",
     "STT_English": "Soft Tissue Tumours (English)",
     "STT_Dutch": "Soft Tissue Tumours (Dutch)",

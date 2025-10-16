@@ -1,7 +1,17 @@
+from pathlib import Path
 import pandas as pd
 import numpy as np
 from scipy import stats
 import statsmodels.formula.api as smf
+import sys
+
+try:
+    project_root = Path(__file__).resolve().parents[1]
+except NameError:
+    project_root = Path.cwd().parents[1]
+
+sys.path.insert(0, str(project_root))
+from evaluation.visualize.utils import read_performances_and_rank
 
 def mixed_effects_variance_partition(
     df,
@@ -72,7 +82,10 @@ def mixed_effects_variance_partition(
                 "Error": str(e)
             })
 
-    return pd.DataFrame(results)
+    df_out = pd.DataFrame(results)
+    numeric_cols = df_out.select_dtypes(include=[np.number]).columns
+    df_out[numeric_cols] = df_out[numeric_cols].round(2)
+    return df_out
 
 def compute_summary(group):
     """Compute summary statistics for a group."""
@@ -89,19 +102,26 @@ def compute_summary(group):
         "n_use_cases": n
     })
 
+
 def get_best_strategy_stats(data, metric_type="macro_avg"):
     """Return summary statistics for the best prompting strategy per LLM."""
     df = data[data["metric_type"] == metric_type]
     df = df[df["Prompt Rank"] == 1].reset_index(drop=True)
     idx = df.groupby(["LLM Name", "Use_Case_mapped"], observed=True)["Use Case Rank"].idxmax()
     df = df.loc[idx]
-    return df.groupby("LLM Category", observed=True).apply(compute_summary).reset_index()
+    result = df.groupby("LLM Category", observed=True).apply(compute_summary).reset_index()
+    result = result.round(2)
+    return result
+
 
 def get_strategy_counts(data, metric_type="macro_avg"):
     """Return counts of how often each strategy was best."""
     df = data[data["metric_type"] == metric_type]
     df = df[df["Prompt Rank"] == 1].reset_index(drop=True)
-    return df["Prompting Strategy Name"].value_counts()
+    result = df["Prompting Strategy Name"].value_counts().reset_index()
+    result.columns = ["Prompting Strategy Name", "Count"]
+    return result
+
 
 def compare_to_zero_shot(data, metric_type="macro_avg"):
     """Compare all strategies to Zero Shot and return summary statistics."""
@@ -120,40 +140,84 @@ def compare_to_zero_shot(data, metric_type="macro_avg"):
         var_name='Strategy',
         value_name='mean'
     )
-    return df.groupby(['Strategy'], observed=True).apply(compute_summary).reset_index()
+    result = df.groupby(['Strategy'], observed=True).apply(compute_summary).reset_index()
+    result = result.round(2)
+    return result
+
 
 def get_best_overall_settings(data):
-    """Print the best setting for each use case."""
+    """Return table of best settings per use case."""
     df = data[data["Use Case Rank"] == 1].reset_index(drop=True)
+    out = []
     for uc in df["Use_Case_mapped"].unique():
         tmp = df[df["Use_Case_mapped"] == uc].reset_index(drop=True)
-        print(f"Best setting for {uc}: {tmp.loc[0]['LLM Name']} with {tmp.loc[0]['Prompting Strategy Name']} (score: {tmp.loc[0]['mean']:.3f})")
-        print(tmp[["field", "field_type", "metric_type", "mean", "ci_low", "ci_high"]])
+        out.append({
+            "Use_Case_mapped": uc,
+            "LLM Name": tmp.loc[0, "LLM Name"],
+            "Prompting Strategy Name": tmp.loc[0, "Prompting Strategy Name"],
+            "Score": round(tmp.loc[0, "mean"], 2),
+            "CI Low": round(tmp.loc[0, "ci_low"], 2),
+            "CI High": round(tmp.loc[0, "ci_high"], 2)
+        })
+    return pd.DataFrame(out)
 
-def get_stats(data):
-    """Main function to compute and print all statistics."""
-    # 1. Best strategy per LLM
-    print("Summary statistics for best prompting strategy per LLM across use-cases (macro-avg):")
-    print(get_best_strategy_stats(data))
 
-    # 2. Strategy counts
-    print("\nNumber of times prompting strategies were best (macro-avg):")
-    print(get_strategy_counts(data))
+def get_stats(data, output_dir=None):
+    """Compute and optionally save all statistics."""
+    results = {}
 
-    # 3. Compare strategies to Zero Shot
-    print("\nSummary statistics for prompting strategies compared to Zero Shot (macro-avg):")
-    print(compare_to_zero_shot(data))
+    results["best_strategy_stats"] = get_best_strategy_stats(data)
+    results["strategy_counts"] = get_strategy_counts(data)
+    results["compare_to_zero_shot"] = compare_to_zero_shot(data)
 
-    # 4. Mixed effects models
-    df4 = data[data["metric_type"] != "macro_avg"].rename(columns={"Prompting Strategy Name": "Prompting_Strategy_Name"})
-    print("\nMixed effects variance partition:")
-    print(mixed_effects_variance_partition(
-        df4,
+    results["variance_partition"] = mixed_effects_variance_partition(
+        data[data["metric_type"] != "macro_avg"].rename(columns={"Prompting Strategy Name": "Prompting_Strategy_Name"}),
         strategy_col="Use_Case_mapped",
         group_col="LLM Name",
         re_formula="~C(Prompting_Strategy_Name)"
-    ))
+    )
 
-    # 5. Best overall settings
-    print("\nBest overall settings per use case:")
-    get_best_overall_settings(data)
+    results["best_overall_settings"] = get_best_overall_settings(data)
+
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for name, df in results.items():
+            df.to_csv(output_dir / f"{name}.csv", index=False)
+        print(f"All summaries written to {output_dir}")
+
+    return results
+
+if __name__ == "__main__":
+    import argparse
+    from pathlib import Path
+    parser = argparse.ArgumentParser(
+        description="Compute statistical summaries and mixed-effects variance partitioning for LLM prompting strategies."
+    )
+    parser.add_argument(
+        "-i", "--input-files",
+        required=True,
+        nargs='+',
+        help="Path(s) to the LLM output file(s)"
+    )
+    parser.add_argument(
+        "-r", "--ranked-results",
+        nargs='+',
+        help="Path(s) to the CSV file(s) with ranked results"
+    )
+    parser.add_argument(
+        "-in", "--inter-rater-agreements",
+        nargs='+',
+        default=[],
+        help="Path(s) to the CSV file(s) with inter-rater-agreements"
+    )
+    parser.add_argument(
+        "-o", "--output-dir",
+        type=str,
+        default=None,
+        help="Directory to save structured CSV summaries (optional)."
+    )
+    args = parser.parse_args()
+
+    data = read_performances_and_rank(args.input_files, args.ranked_results, args.inter_rater_agreements)
+    get_stats(data, output_dir=args.output_dir)
