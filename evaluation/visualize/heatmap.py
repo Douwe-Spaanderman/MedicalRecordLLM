@@ -385,15 +385,15 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "-in",
-        "--inter-rater-agreement",
-        type=str,
-        default=None,
-        help="Path to the CSV file with inter-rater-agreement"
+        "--inter-rater-agreements",
+        nargs='+',
+        default=[],
+        help="Path(s) to the CSV file(s) with inter-rater-agreements"
     )
     args = parser.parse_args()
 
     from utils import read_performances_and_rank
-    data = read_performances_and_rank(args.input_files, args.ranked_results, args.inter_rater_agreement)
+    data = read_performances_and_rank(args.input_files, args.ranked_results, args.inter_rater_agreements)
     
     create_heatmap(data, figsize=figsizes.get(data["Use_Case"].iloc[0]))
     plt.savefig(args.output_file, bbox_inches='tight', dpi=300)

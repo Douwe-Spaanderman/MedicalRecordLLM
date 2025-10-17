@@ -58,6 +58,56 @@ def categorize_and_sort(data):
 
     return data
 
+def compare_strategy_preferences(data, metric_type="macro_avg"):
+    """
+    Compare all strategies to Zero Shot, and summarize:
+    1) overall delta (like before),
+    2) per-LLM strategy preference,
+    3) per-LLM-category strategy preference.
+    """
+    df = data[data["metric_type"] == metric_type]
+    
+    # Pivot table for easier calculation
+    df_pivot = df.pivot_table(
+        index=['Use_Case_mapped', 'LLM Name', 'LLM Category'],
+        columns='Prompting Strategy Name',
+        values='mean'
+    ).reset_index()
+    
+    strategies = ['One Shot', 'Few Shot', 'Chain-of-Thought', 'Self-Consistency', 'Prompt Graph']
+    
+    # Compute deltas w.r.t Zero Shot
+    for strat in strategies:
+        df_pivot[f'delta_{strat}'] = df_pivot[strat] - df_pivot['Zero Shot']
+    
+    delta_cols = [f'delta_{s}' for s in strategies]
+    
+    # Melt for general summary (as in your function)
+    df_melt = df_pivot.melt(
+        id_vars=['Use_Case_mapped', 'LLM Name', 'LLM Category'],
+        value_vars=delta_cols,
+        var_name='Strategy',
+        value_name='mean'
+    )
+    
+    # Overall summary across all LLMs & use cases
+    overall_summary = df_melt.groupby(['Strategy'], observed=True).apply(compute_summary).reset_index()
+    overall_summary = overall_summary.round(2)
+    
+    # Per-LLM summary: how each LLM responds to strategies
+    llm_summary = df_melt.groupby(['LLM Name', 'Strategy'], observed=True).apply(compute_summary).reset_index()
+    llm_summary = llm_summary.round(2)
+    
+    # Per-LLM-category summary: how categories respond to strategies
+    category_summary = df_melt.groupby(['LLM Category', 'Strategy'], observed=True).apply(compute_summary).reset_index()
+    category_summary = category_summary.round(2)
+    
+    return {
+        "overall_summary": overall_summary,
+        "per_llm_summary": llm_summary,
+        "per_category_summary": category_summary
+    }
+
 def read_performances_and_rank(
     input_files: List[Union[str, os.PathLike]],
     rank_files: Optional[List[Union[str, os.PathLike]]] = None,
